@@ -17,13 +17,13 @@ use suffix::I18nPakFileInfo;
 #[derive(Debug, Parser)]
 struct Cli {
     /// Paths to pak files.
-    #[arg(short, long, default_value = "")]
+    #[arg(short, long)]
     pak: Vec<String>,
     /// A list of paths to pak files. Each line is a path to a pak file.
     #[arg(long)]
     pak_list: Option<String>,
     /// Paths to dmp files.
-    #[arg(short, long, default_value = "")]
+    #[arg(short, long)]
     dmp: Vec<String>,
 }
 
@@ -44,6 +44,11 @@ fn main() -> eyre::Result<()> {
             }
         }
         cli.pak.extend(pak_file_list);
+    }
+
+    if cli.pak.is_empty() && cli.dmp.is_empty() {
+        eprintln!("Error: No PAK or DMP files specified. Use --pak, --pak-list, or --dmp options.");
+        std::process::exit(1);
     }
 
     let start = std::time::Instant::now();
@@ -162,74 +167,78 @@ fn search_path_optimized(pak: &[String], dmp: &[String]) -> eyre::Result<()> {
         Ok(paths)
     };
 
-    for dmp in dmp {
-        eprintln!("Scanning {dmp}..");
+    if !dmp.is_empty() {
+        for dmp in dmp {
+            eprintln!("Scanning {dmp}..");
 
-        let dmp = Minidump::read_path(dmp)?;
-        let memory = dmp
-            .get_stream::<MinidumpMemory64List>()
-            .context("No full dump memory found")?;
+            let dmp = Minidump::read_path(dmp)?;
+            let memory = dmp
+                .get_stream::<MinidumpMemory64List>()
+                .context("No full dump memory found")?;
 
-        let mut memory: Vec<_> = memory.iter().collect();
-        // merge memory blocks
-        memory.sort_by_key(|memory| memory.base_address);
-        use std::borrow::*;
-        struct Block<'a> {
-            base: u64,
-            len: u64,
-            data: Cow<'a, [u8]>,
-        }
-
-        let mut memory_blocks: Vec<Block> = vec![];
-        for piece in memory {
-            if let Some(prev) = memory_blocks.last_mut() {
-                if prev.base + prev.len == piece.base_address {
-                    prev.data.to_mut().extend(piece.bytes);
-                    prev.len += piece.size;
-                    continue;
-                }
+            let mut memory: Vec<_> = memory.iter().collect();
+            // merge memory blocks
+            memory.sort_by_key(|memory| memory.base_address);
+            use std::borrow::*;
+            struct Block<'a> {
+                base: u64,
+                len: u64,
+                data: Cow<'a, [u8]>,
             }
-            memory_blocks.push(Block {
-                base: piece.base_address,
-                len: piece.size,
-                data: Cow::Borrowed(piece.bytes),
-            })
-        }
 
+            let mut memory_blocks: Vec<Block> = vec![];
+            for piece in memory {
+                if let Some(prev) = memory_blocks.last_mut() {
+                    if prev.base + prev.len == piece.base_address {
+                        prev.data.to_mut().extend(piece.bytes);
+                        prev.len += piece.size;
+                        continue;
+                    }
+                }
+                memory_blocks.push(Block {
+                    base: piece.base_address,
+                    len: piece.size,
+                    data: Cow::Borrowed(piece.bytes),
+                })
+            }
+
+            all_paths.par_extend(
+                memory_blocks
+                    .par_iter()
+                    .map(|memory| search_memory(&memory.data))
+                    .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
+            );
+        }
+    }
+
+    if !pak.path_hashes.is_empty() {
+        bar.set_position(0);
+        bar.set_style(
+            ProgressStyle::default_spinner().template("{spinner} [Pak] Paths found: {pos} {msg}")?,
+        );
+        let indexes = pak.path_hashes.clone();
+        // // DEBUG
+        // let hash = ree_pak_core::filename::FileNameFull::from(
+        //     "natives/STM/GameDesign/Catalog/00_00/Data/EnemyPackageList.user.3",
+        // )
+        // .hash_mixed();
+        // let indexes = indexes
+        //     .into_par_iter()
+        //     .filter(|(key, _)| *key == hash)
+        //     .collect::<FxHashMap<_, _>>();
+        // println!("indexes: {}", indexes.len());
+        eprintln!("Scanning all PAK files..");
         all_paths.par_extend(
-            memory_blocks
-                .par_iter()
-                .map(|memory| search_memory(&memory.data))
+            indexes
+                .keys()
+                .par_bridge()
+                .map(|hash| {
+                    let file = pak.read_file_by_hash(*hash)?;
+                    search_memory(&file)
+                })
                 .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
         );
     }
-
-    bar.set_position(0);
-    bar.set_style(
-        ProgressStyle::default_spinner().template("{spinner} [Pak] Paths found: {pos} {msg}")?,
-    );
-    let indexes = pak.path_hashes.clone();
-    // // DEBUG
-    // let hash = ree_pak_core::filename::FileNameFull::from(
-    //     "natives/STM/GameDesign/Catalog/00_00/Data/EnemyPackageList.user.3",
-    // )
-    // .hash_mixed();
-    // let indexes = indexes
-    //     .into_par_iter()
-    //     .filter(|(key, _)| *key == hash)
-    //     .collect::<FxHashMap<_, _>>();
-    // println!("indexes: {}", indexes.len());
-    eprintln!("Scanning all PAK files..");
-    all_paths.par_extend(
-        indexes
-            .keys()
-            .par_bridge()
-            .map(|hash| {
-                let file = pak.read_file_by_hash(*hash)?;
-                search_memory(&file)
-            })
-            .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
-    );
 
     println!("Sorting results..");
     all_paths.sort_by(|(p, _), (q, _)| p.cmp(q));
