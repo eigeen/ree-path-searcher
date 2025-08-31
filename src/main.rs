@@ -6,6 +6,7 @@ use std::{
 
 use clap::Parser;
 use color_eyre::eyre;
+use indicatif::{ProgressBar, ProgressStyle};
 use ree_path_searcher::{PathSearcher, SearchResult};
 
 #[derive(Debug, Parser)]
@@ -89,7 +90,23 @@ fn main() -> eyre::Result<()> {
     if !cli.dmp.is_empty() {
         for dmp in &cli.dmp {
             eprintln!("Scanning {dmp}..");
-            let result = searcher.search_memory_dump(dmp)?;
+            let progress_bar = ProgressBar::new(100);
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template(
+                        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}",
+                    )
+                    .unwrap()
+                    .progress_chars("##-"),
+            );
+
+            let result =
+                searcher.search_memory_dump_with_progress(dmp, |current: u64, total: u64| {
+                    progress_bar.set_length(total);
+                    progress_bar.set_position(current);
+                })?;
+
+            progress_bar.finish_with_message("Scan dump finished.");
             all_results.found_paths.extend(result.found_paths);
             all_results.unknown_paths.extend(result.unknown_paths);
         }
@@ -97,7 +114,20 @@ fn main() -> eyre::Result<()> {
 
     if searcher.pak_file_count() != 0 {
         eprintln!("Scanning all PAK files..");
-        let result = searcher.search_pak_files()?;
+        let progress_bar = ProgressBar::new(searcher.pak_file_count() as u64);
+        progress_bar.set_style(
+            ProgressStyle::default_bar()
+                .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}")
+                .unwrap()
+                .progress_chars("##-"),
+        );
+
+        let result = searcher.search_pak_files_with_progress(|current: u64, total: u64| {
+            progress_bar.set_length(total);
+            progress_bar.set_position(current);
+        })?;
+
+        progress_bar.finish_with_message("Scan pak files finished.");
         all_results.found_paths.extend(result.found_paths);
         all_results.unknown_paths.extend(result.unknown_paths);
     }

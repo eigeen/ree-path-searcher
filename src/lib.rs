@@ -17,6 +17,19 @@ use suffix::I18nPakFileInfo;
 
 pub use pak::PakCollection;
 
+pub trait ProgressCallback {
+    fn on_progress(&self, current: u64, total: u64);
+}
+
+impl<F> ProgressCallback for F
+where
+    F: for<'a> Fn(u64, u64),
+{
+    fn on_progress(&self, current: u64, total: u64) {
+        self(current, total);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct SearchResult {
     pub found_paths: Vec<(String, Vec<I18nPakFileInfo>)>,
@@ -76,6 +89,18 @@ impl PathSearcher {
     }
 
     pub fn search_memory_dump(&self, dmp_path: &str) -> eyre::Result<SearchResult> {
+        fn no_op_progress(_current: u64, _total: u64) {}
+        self.search_memory_dump_with_progress(dmp_path, no_op_progress)
+    }
+
+    pub fn search_memory_dump_with_progress<P>(
+        &self,
+        dmp_path: &str,
+        progress: P,
+    ) -> eyre::Result<SearchResult>
+    where
+        P: ProgressCallback + Send + Sync,
+    {
         let mut all_paths: Vec<(String, Vec<I18nPakFileInfo>)> = vec![];
         let unk_paths = Mutex::new(FxHashSet::default());
 
@@ -109,10 +134,19 @@ impl PathSearcher {
             })
         }
 
+        progress.on_progress(0, memory_blocks.len() as u64);
+
+        let processed = Mutex::new(0u64);
         all_paths.par_extend(
             memory_blocks
                 .par_iter()
-                .map(|memory| self.search_memory(&memory.data, &unk_paths))
+                .map(|memory| {
+                    let result = self.search_memory(&memory.data, &unk_paths);
+                    let mut count = processed.lock();
+                    *count += 1;
+                    progress.on_progress(*count, memory_blocks.len() as u64);
+                    result
+                })
                 .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
         );
 
@@ -126,6 +160,14 @@ impl PathSearcher {
     }
 
     pub fn search_pak_files(&self) -> eyre::Result<SearchResult> {
+        fn no_op_progress(_current: u64, _total: u64) {}
+        self.search_pak_files_with_progress(no_op_progress)
+    }
+
+    pub fn search_pak_files_with_progress<P>(&self, progress: P) -> eyre::Result<SearchResult>
+    where
+        P: ProgressCallback + Send + Sync,
+    {
         let Some(pak_collection) = &self.pak_collection else {
             return Ok(SearchResult::default());
         };
@@ -134,13 +176,25 @@ impl PathSearcher {
         let unk_paths = Mutex::new(FxHashSet::default());
 
         let indexes = pak_collection.path_hashes.clone();
+        let total_files = indexes.len() as u64;
+
+        progress.on_progress(0, total_files);
+
+        let processed = Mutex::new(0u64);
         all_paths.par_extend(
             indexes
                 .keys()
                 .par_bridge()
                 .map(|hash| {
-                    let file = pak_collection.read_file_by_hash(*hash)?;
-                    self.search_memory(&file, &unk_paths)
+                    let result = pak_collection
+                        .read_file_by_hash(*hash)
+                        .and_then(|file| self.search_memory(&file, &unk_paths));
+
+                    let mut count = processed.lock();
+                    *count += 1;
+                    progress.on_progress(*count, total_files);
+
+                    result
                 })
                 .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
         );
