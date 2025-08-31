@@ -188,12 +188,12 @@ fn search_path_optimized(pak: &[String], dmp: &[String]) -> eyre::Result<()> {
 
             let mut memory_blocks: Vec<Block> = vec![];
             for piece in memory {
-                if let Some(prev) = memory_blocks.last_mut() {
-                    if prev.base + prev.len == piece.base_address {
-                        prev.data.to_mut().extend(piece.bytes);
-                        prev.len += piece.size;
-                        continue;
-                    }
+                if let Some(prev) = memory_blocks.last_mut()
+                    && prev.base + prev.len == piece.base_address
+                {
+                    prev.data.to_mut().extend(piece.bytes);
+                    prev.len += piece.size;
+                    continue;
                 }
                 memory_blocks.push(Block {
                     base: piece.base_address,
@@ -214,7 +214,8 @@ fn search_path_optimized(pak: &[String], dmp: &[String]) -> eyre::Result<()> {
     if !pak.path_hashes.is_empty() {
         bar.set_position(0);
         bar.set_style(
-            ProgressStyle::default_spinner().template("{spinner} [Pak] Paths found: {pos} {msg}")?,
+            ProgressStyle::default_spinner()
+                .template("{spinner} [Pak] Paths found: {pos} {msg}")?,
         );
         let indexes = pak.path_hashes.clone();
         // // DEBUG
