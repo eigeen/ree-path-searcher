@@ -1,10 +1,11 @@
 pub mod pak;
-pub mod suffix;
-pub mod utils;
+
+mod suffix;
+mod utils;
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{self, Write};
+use std::io;
 use std::path::{Path, PathBuf};
 
 use color_eyre::eyre::{self, Context};
@@ -15,8 +16,6 @@ use rustc_hash::FxHashSet;
 use suffix::I18nPakFileInfo;
 
 pub use pak::PakCollection;
-pub use suffix::{I18nPakFileInfo as PathInfo, find_path_i18n};
-pub use utils::string_from_utf16_bytes;
 
 #[derive(Debug, Clone, Default)]
 pub struct SearchResult {
@@ -55,17 +54,12 @@ impl PathSearcherBuilder {
     }
 }
 
+#[derive(Default)]
 pub struct PathSearcher {
     pak_collection: Option<PakCollection<'static, io::BufReader<File>>>,
 }
 
 impl PathSearcher {
-    pub fn new() -> Self {
-        Self {
-            pak_collection: None,
-        }
-    }
-
     pub fn builder() -> PathSearcherBuilder {
         PathSearcherBuilder::default()
     }
@@ -231,12 +225,6 @@ impl PathSearcher {
     }
 }
 
-impl Default for PathSearcher {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 fn accept_char(c: u8) -> bool {
     if c == b' ' {
         return true;
@@ -259,26 +247,4 @@ fn validate_path(path: &str) -> bool {
         return false;
     };
     !(dot_pos == 0 || dot_pos == tail.len() - 1)
-}
-
-pub fn export_results(result: &SearchResult) -> eyre::Result<()> {
-    let file = File::create("output_raw.list")?;
-    let mut raw_writer = std::io::BufWriter::new(file);
-    let file = File::create("output.list")?;
-    let mut writer = std::io::BufWriter::new(file);
-
-    for (raw_path, indexes) in &result.found_paths {
-        for index in indexes {
-            writeln!(writer, "{}", index.full_path)?;
-        }
-        writeln!(raw_writer, "{}", raw_path)?;
-    }
-
-    let file = File::create("unknown.list")?;
-    let mut writer = std::io::BufWriter::new(file);
-    for path in &result.unknown_paths {
-        writeln!(writer, "{}", path)?;
-    }
-
-    Ok(())
 }

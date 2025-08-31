@@ -1,12 +1,12 @@
 use std::{
     fs::File,
-    io::{self, BufRead},
+    io::{self, BufRead, Write},
     time::Instant,
 };
 
 use clap::Parser;
 use color_eyre::eyre;
-use ree_path_searcher::{export_results, PathSearcher};
+use ree_path_searcher::{PathSearcher, SearchResult};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -33,11 +33,27 @@ fn load_pak_list(pak_list_file: &str) -> eyre::Result<Vec<String>> {
     Ok(pak_file_list)
 }
 
+fn export_results(result: &SearchResult) -> eyre::Result<()> {
+    let mut raw_writer = std::io::BufWriter::new(File::create("output_raw.list")?);
+    let mut writer = std::io::BufWriter::new(File::create("output.list")?);
+
+    for (raw_path, indexes) in &result.found_paths {
+        for index in indexes {
+            writeln!(writer, "{}", index.full_path)?;
+        }
+        writeln!(raw_writer, "{}", raw_path)?;
+    }
+
+    let mut unknown_writer = std::io::BufWriter::new(File::create("unknown.list")?);
+    for path in &result.unknown_paths {
+        writeln!(unknown_writer, "{}", path)?;
+    }
+
+    Ok(())
+}
+
 fn main() -> eyre::Result<()> {
     color_eyre::install()?;
-    env_logger::builder()
-        .filter_level(log::LevelFilter::Debug)
-        .init();
 
     let cli = Cli::parse();
 
@@ -79,7 +95,7 @@ fn main() -> eyre::Result<()> {
         }
     }
 
-    if !cli.pak.is_empty() {
+    if searcher.pak_file_count() != 0 {
         eprintln!("Scanning all PAK files..");
         let result = searcher.search_pak_files()?;
         all_results.found_paths.extend(result.found_paths);

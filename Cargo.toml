@@ -20,8 +20,6 @@ ree-pak-core = { git = "https://github.com/eigeen/ree-pak-rs.git" }
 
 clap = { version = "4.5", features = ["derive"] }
 color-eyre = "0.6"
-env_logger = "0.11"
-log = { version = "0.4", features = ["std"] }
 memchr = "2.7"
 minidump = "0.26"
 parking_lot = "0.12"
