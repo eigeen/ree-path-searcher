@@ -7,15 +7,17 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::io;
 use std::path::{Path, PathBuf};
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use color_eyre::eyre::{self, Context};
+use dashmap::DashMap;
 use minidump::{Minidump, MinidumpMemory64List};
 use parking_lot::Mutex;
 use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelExtend, ParallelIterator};
-use rustc_hash::FxHashSet;
+use rustc_hash::{FxBuildHasher, FxHashSet};
 use suffix::I18nPakFileInfo;
 
-pub use pak::PakCollection;
+pub use pak::{PakCollection, load_pak_files_to_memory};
 
 pub trait ProgressCallback {
     fn on_progress(&self, current: u64, total: u64);
@@ -55,29 +57,39 @@ impl PathSearcherBuilder {
 
     pub fn build(self) -> eyre::Result<PathSearcher> {
         if self.pak_paths.is_empty() {
-            return Ok(PathSearcher {
-                pak_collection: None,
-            });
+            return Ok(PathSearcher::default());
         }
 
         let pak_collection = PakCollection::from_paths(&self.pak_paths)?;
         Ok(PathSearcher {
             pak_collection: Some(pak_collection),
+            ..Default::default()
         })
     }
 }
 
-#[derive(Default)]
-pub struct PathSearcher {
-    pak_collection: Option<PakCollection<'static, io::BufReader<File>>>,
+pub struct PathSearcher<R = io::BufReader<File>> {
+    pak_collection: Option<PakCollection<'static, R>>,
+    path_cache: DashMap<String, Option<Vec<I18nPakFileInfo>>, FxBuildHasher>,
 }
 
-impl PathSearcher {
+impl<R> Default for PathSearcher<R> {
+    fn default() -> Self {
+        Self {
+            pak_collection: None,
+            path_cache: DashMap::default(),
+        }
+    }
+}
+
+impl PathSearcher<io::BufReader<File>> {
     pub fn builder() -> PathSearcherBuilder {
         PathSearcherBuilder::default()
     }
+}
 
-    pub fn pak_collection(&self) -> Option<&PakCollection<'static, io::BufReader<File>>> {
+impl<R> PathSearcher<R> {
+    pub fn pak_collection(&self) -> Option<&PakCollection<'static, R>> {
         self.pak_collection.as_ref()
     }
 
@@ -87,7 +99,26 @@ impl PathSearcher {
             .map(|c| c.path_hashes.len())
             .unwrap_or(0)
     }
+}
 
+impl PathSearcher<io::Cursor<Vec<u8>>> {
+    pub fn from_memory(pak_data: Vec<Vec<u8>>) -> eyre::Result<Self> {
+        if pak_data.is_empty() {
+            return Ok(PathSearcher::default());
+        }
+
+        let pak_collection = PakCollection::from_memory(&pak_data)?;
+        Ok(PathSearcher {
+            pak_collection: Some(pak_collection),
+            path_cache: DashMap::default(),
+        })
+    }
+}
+
+impl<R> PathSearcher<R>
+where
+    R: io::Read + io::Seek + Send,
+{
     pub fn search_memory_dump(&self, dmp_path: &str) -> eyre::Result<SearchResult> {
         fn no_op_progress(_current: u64, _total: u64) {}
         self.search_memory_dump_with_progress(dmp_path, no_op_progress)
@@ -118,12 +149,19 @@ impl PathSearcher {
             data: Cow<'a, [u8]>,
         }
 
-        let mut memory_blocks: Vec<Block> = vec![];
+        let mut memory_blocks: Vec<Block> = Vec::with_capacity(memory.len());
         for piece in memory {
             if let Some(prev) = memory_blocks.last_mut()
                 && prev.base + prev.len == piece.base_address
             {
-                prev.data.to_mut().extend(piece.bytes);
+                // Only convert to owned when necessary
+                if matches!(prev.data, Cow::Borrowed(_)) {
+                    let mut owned = prev.data.to_vec();
+                    owned.extend(piece.bytes);
+                    prev.data = Cow::Owned(owned);
+                } else {
+                    prev.data.to_mut().extend(piece.bytes);
+                }
                 prev.len += piece.size;
                 continue;
             }
@@ -180,7 +218,7 @@ impl PathSearcher {
 
         progress.on_progress(0, total_files);
 
-        let processed = Mutex::new(0u64);
+        let processed = AtomicU64::new(0);
         all_paths.par_extend(
             indexes
                 .keys()
@@ -190,9 +228,8 @@ impl PathSearcher {
                         .read_file_by_hash(*hash)
                         .and_then(|file| self.search_memory(&file, &unk_paths));
 
-                    let mut count = processed.lock();
-                    *count += 1;
-                    progress.on_progress(*count, total_files);
+                    let count = processed.fetch_add(1, Ordering::Relaxed);
+                    progress.on_progress(count, total_files);
 
                     result
                 })
@@ -264,10 +301,29 @@ impl PathSearcher {
 
             if validate_path(&path) {
                 if let Some(pak) = &self.pak_collection {
+                    // Check cache first
+                    if let Some(cached_result) = self.path_cache.get(&path) {
+                        // Cache hit
+                        if let Some(cached_result) = cached_result.value() {
+                            paths.push((path, cached_result.clone()));
+                        } else {
+                            // If stores None, then ignore
+                        }
+                        continue;
+                    }
+
+                    // Perform lookup
                     let Ok(file_hashes) = suffix::find_path_i18n(pak, &path) else {
-                        unk_paths.lock().insert(path);
+                        // No result
+                        unk_paths.lock().insert(path.clone());
+                        // Also cache empty result
+                        self.path_cache.insert(path, None);
                         continue;
                     };
+
+                    // Cache the result
+                    self.path_cache
+                        .insert(path.clone(), Some(file_hashes.clone()));
                     paths.push((path, file_hashes));
                 } else {
                     paths.push((path, vec![]));
@@ -294,11 +350,19 @@ fn accept_char(c: u8) -> bool {
 }
 
 fn validate_path(path: &str) -> bool {
+    // Quick length check first
+    if path.len() < 3 {
+        return false;
+    }
+
     let Some((_, tail)) = path.rsplit_once('/') else {
         return false;
     };
+
     let Some(dot_pos) = tail.find('.') else {
         return false;
     };
-    !(dot_pos == 0 || dot_pos == tail.len() - 1)
+
+    // More efficient bounds check
+    dot_pos > 0 && dot_pos < tail.len() - 1
 }

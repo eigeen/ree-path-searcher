@@ -1,15 +1,12 @@
 use std::{
     fs::File,
-    io::{self, Read},
+    io::{self, Cursor, Read},
     path::Path,
 };
 
 use color_eyre::eyre::{self, Context, ContextCompat};
 use parking_lot::Mutex;
-use ree_pak_core::{
-    filename::{FileNameExt, FileNameFull},
-    read::archive::PakArchiveReader,
-};
+use ree_pak_core::{filename::FileNameExt, read::archive::PakArchiveReader};
 use rustc_hash::FxHashMap;
 
 #[derive(Clone)]
@@ -55,10 +52,52 @@ impl PakCollection<'_, io::BufReader<File>> {
     }
 }
 
+impl PakCollection<'_, Cursor<Vec<u8>>> {
+    pub fn from_memory(pak_data: &[Vec<u8>]) -> eyre::Result<Self> {
+        let mut pak_readers = Vec::with_capacity(pak_data.len());
+        let mut path_hashes = FxHashMap::default();
+
+        for (index, data) in pak_data.iter().enumerate() {
+            let mut reader = Cursor::new(data.clone());
+            let pak_archive = ree_pak_core::read::read_archive(&mut reader)?;
+            for (entry_index, entry) in pak_archive.entries().iter().enumerate() {
+                path_hashes.insert(
+                    entry.hash(),
+                    PakFileIndex {
+                        archive_index: index,
+                        entry_index,
+                    },
+                );
+            }
+
+            let archive_reader = PakArchiveReader::new_owned(reader, pak_archive);
+            pak_readers.push(archive_reader);
+        }
+
+        Ok(Self {
+            pak_readers: Mutex::new(pak_readers),
+            path_hashes,
+        })
+    }
+}
+
+pub fn load_pak_files_to_memory(paths: &[impl AsRef<Path>]) -> eyre::Result<Vec<Vec<u8>>> {
+    let mut pak_data = Vec::with_capacity(paths.len());
+    
+    for path in paths.iter() {
+        let path = path.as_ref();
+        let mut file = File::open(path).context("Failed to open pak file")?;
+        let mut data = Vec::new();
+        file.read_to_end(&mut data).context("Failed to read pak file")?;
+        pak_data.push(data);
+    }
+    
+    Ok(pak_data)
+}
+
 impl<R> PakCollection<'_, R> {
     pub fn contains_path(&self, path: &str) -> bool {
-        let name = FileNameFull::from(path);
-        let hash = name.hash_mixed();
+        let hash = path.hash_mixed();
         self.path_hashes.contains_key(&hash)
     }
 }

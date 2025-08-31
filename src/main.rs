@@ -1,7 +1,7 @@
 use std::{
     fs::File,
     io::{self, BufRead, Write},
-    time::Instant,
+    time::{Duration, Instant},
 };
 
 use clap::Parser;
@@ -91,6 +91,7 @@ fn main() -> eyre::Result<()> {
         for dmp in &cli.dmp {
             eprintln!("Scanning {dmp}..");
             let progress_bar = ProgressBar::new(100);
+            progress_bar.enable_steady_tick(Duration::from_millis(100));
             progress_bar.set_style(
                 ProgressStyle::default_bar()
                     .template(
@@ -115,6 +116,7 @@ fn main() -> eyre::Result<()> {
     if searcher.pak_file_count() != 0 {
         eprintln!("Scanning all PAK files..");
         let progress_bar = ProgressBar::new(searcher.pak_file_count() as u64);
+        progress_bar.enable_steady_tick(Duration::from_millis(100));
         progress_bar.set_style(
             ProgressStyle::default_bar()
                 .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}")
@@ -133,7 +135,9 @@ fn main() -> eyre::Result<()> {
     }
 
     println!("Sorting results..");
-    all_results.found_paths.sort_by(|(p, _), (q, _)| p.cmp(q));
+    all_results
+        .found_paths
+        .sort_unstable_by(|(p, _), (q, _)| p.cmp(q));
     all_results.found_paths.dedup_by(|(p, _), (q, _)| p == q);
 
     println!("Exporting results..");

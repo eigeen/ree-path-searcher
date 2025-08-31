@@ -1,5 +1,4 @@
-use core::str;
-use std::{borrow::Cow, sync::LazyLock};
+use std::sync::LazyLock;
 
 use color_eyre::eyre::{self, ContextCompat};
 use rustc_hash::FxHashMap;
@@ -7,9 +6,9 @@ use rustc_hash::FxHashMap;
 use crate::pak;
 
 pub const LANGUAGE_LIST: &[&str] = &[
-    "", "Ja", "En", "Fr", "It", "De", "Es", "Ru", "Pl", "Nl", "Pt", "PtBR", "Ko", "ZhTW", "ZhCN",
-    "Fi", "Sv", "Da", "No", "Cs", "Hu", "Sk", "Ar", "Tr", "Bu", "Gr", "Ro", "Th", "Uk", "Vi", "Id",
-    "Fc", "Hi", "Es419",
+    "Ja", "En", "Fr", "It", "De", "Es", "Ru", "Pl", "Nl", "Pt", "PtBR", "Ko", "ZhTW", "ZhCN", "Fi",
+    "Sv", "Da", "No", "Cs", "Hu", "Sk", "Ar", "Tr", "Bu", "Gr", "Ro", "Th", "Uk", "Vi", "Id", "Fc",
+    "Hi", "Es419",
 ];
 
 // The suffix list for a particular file format is ordered that the first version comes first
@@ -240,6 +239,7 @@ pub static SUFFIX_MAP_FULL: LazyLock<FxHashMap<&'static str, &'static [u32]>> =
         ])
     });
 
+
 #[derive(Debug, Clone)]
 pub struct I18nPakFileInfo {
     pub full_path: String,
@@ -296,18 +296,22 @@ pub fn find_path_i18n<R>(
             format!("natives/MSG/{path}.{suffix}.MSG"),
         ];
 
-        for &language in LANGUAGE_LIST {
-            for full_path in &full_paths {
-                let with_language: Cow<'_, str> = if language.is_empty() {
-                    Cow::Borrowed(full_path)
-                } else {
-                    Cow::Owned(format!("{full_path}.{language}"))
-                };
+        for full_path in &full_paths {
+            // Check base path first (no language suffix)
+            if pak.contains_path(full_path) {
+                result.push(I18nPakFileInfo {
+                    full_path: full_path.clone(),
+                });
+            }
+
+            // Then check with language suffixes
+            for &language in LANGUAGE_LIST {
+                // Skip empty language as it's already checked
+                let with_language = format!("{full_path}.{language}");
                 if pak.contains_path(&with_language) {
                     result.push(I18nPakFileInfo {
-                        full_path: with_language.to_string(),
+                        full_path: with_language,
                     });
-                    break;
                 }
             }
         }
