@@ -344,35 +344,37 @@ where
                 continue;
             };
 
-            if validate_path(&path) {
-                if let Some(pak) = &self.pak_collection {
-                    // Check cache first
-                    if let Some(cached_result) = self.path_cache.get(&path) {
-                        // Cache hit
-                        if let Some(cached_result) = cached_result.value() {
-                            paths.push((path, cached_result.clone()));
-                        } else {
-                            // If stores None, then ignore
-                        }
-                        continue;
+            if !validate_path(&path) {
+                continue;
+            }
+
+            if let Some(pak) = &self.pak_collection {
+                // Check cache first
+                if let Some(cached_result) = self.path_cache.get(&path) {
+                    // Cache hit
+                    if let Some(cached_result) = cached_result.value() {
+                        paths.push((path, cached_result.clone()));
+                    } else {
+                        // If stores None, then ignore
                     }
-
-                    // Perform lookup
-                    let Ok(file_hashes) = suffix::find_path_i18n(pak, &path) else {
-                        // No result
-                        unk_paths.lock().insert(path.clone());
-                        // Also cache empty result
-                        self.path_cache.insert(path, None);
-                        continue;
-                    };
-
-                    // Cache the result
-                    self.path_cache
-                        .insert(path.clone(), Some(file_hashes.clone()));
-                    paths.push((path, file_hashes));
-                } else {
-                    paths.push((path, vec![]));
+                    continue;
                 }
+
+                // Perform lookup
+                let Ok(file_hashes) = suffix::find_path_i18n(pak, &path) else {
+                    // No result
+                    unk_paths.lock().insert(path.clone());
+                    // Also cache empty result
+                    self.path_cache.insert(path, None);
+                    continue;
+                };
+
+                // Cache the result
+                self.path_cache
+                    .insert(path.clone(), Some(file_hashes.clone()));
+                paths.push((path, file_hashes));
+            } else {
+                paths.push((path, vec![]));
             }
         }
 
@@ -408,6 +410,6 @@ fn validate_path(path: &str) -> bool {
         return false;
     };
 
-    // More efficient bounds check
+    // dot must be in the middle
     dot_pos > 0 && dot_pos < tail.len() - 1
 }
