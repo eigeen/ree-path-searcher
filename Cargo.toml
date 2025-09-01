@@ -27,6 +27,7 @@ rayon = "1.10"
 rustc-hash = "2.1"
 indicatif = "0.18"
 dashmap = "6.1"
+num_cpus = "1.17.0"
 
 [features]
 default = []

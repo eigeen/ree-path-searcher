@@ -20,6 +20,9 @@ struct Cli {
     /// Paths to dmp files.
     #[arg(short, long)]
     dmp: Vec<String>,
+    /// Number of threads to use.
+    #[arg(long)]
+    threads: Option<usize>,
 }
 
 fn load_pak_list(pak_list_file: &str) -> eyre::Result<Vec<String>> {
@@ -62,6 +65,16 @@ fn main() -> eyre::Result<()> {
         eprintln!("Error: No PAK or DMP files specified. Use --pak, --pak-list, or --dmp options.");
         std::process::exit(1);
     }
+
+    // set rayon threads
+    let threads = if let Some(threads) = cli.threads {
+        threads.min(num_cpus::get())
+    } else {
+        num_cpus::get().min(8)
+    };
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(threads)
+        .build_global()?;
 
     let start = Instant::now();
 
