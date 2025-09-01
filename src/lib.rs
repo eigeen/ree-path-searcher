@@ -1,12 +1,13 @@
 pub mod pak;
 
+mod filter;
 mod suffix;
 mod utils;
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io;
-use std::path::{Path, PathBuf};
+use std::io::{self, Read, Seek};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use color_eyre::eyre::{self, Context};
@@ -17,6 +18,7 @@ use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelExtend, Paral
 use rustc_hash::{FxBuildHasher, FxHashSet};
 use suffix::I18nPakFileInfo;
 
+pub use filter::{DefaultFilter, FileContext, Filter};
 pub use pak::{PakCollection, load_pak_files_to_memory};
 
 pub trait ProgressCallback {
@@ -38,39 +40,66 @@ pub struct SearchResult {
     pub unknown_paths: FxHashSet<String>,
 }
 
-#[derive(Default)]
-pub struct PathSearcherBuilder {
-    pak_paths: Vec<PathBuf>,
+pub struct PathSearcherBuilder<R> {
+    pak_source: Vec<R>,
+    filter: Option<Box<dyn Filter + Send + Sync>>,
 }
 
-impl PathSearcherBuilder {
-    pub fn with_pak_file(mut self, pak_path: impl AsRef<Path>) -> eyre::Result<Self> {
-        self.pak_paths.push(pak_path.as_ref().to_path_buf());
+impl<R> Default for PathSearcherBuilder<R> {
+    fn default() -> Self {
+        Self {
+            pak_source: vec![],
+            filter: Some(Box::new(DefaultFilter)),
+        }
+    }
+}
+
+impl<R: Read + Seek + Send> PathSearcherBuilder<R> {
+    pub fn with_pak_file(mut self, reader: R) -> eyre::Result<Self> {
+        self.pak_source.push(reader);
         Ok(self)
     }
 
-    pub fn with_pak_files(mut self, pak_paths: &[impl AsRef<Path>]) -> Self {
-        self.pak_paths
-            .extend(pak_paths.iter().map(|p| p.as_ref().to_path_buf()));
+    pub fn with_pak_files(mut self, readers: impl IntoIterator<Item = R>) -> Self {
+        self.pak_source.extend(readers);
         self
     }
 
-    pub fn build(self) -> eyre::Result<PathSearcher> {
-        if self.pak_paths.is_empty() {
-            return Ok(PathSearcher::default());
-        }
+    pub fn with_filter(mut self, filter: Option<Box<dyn Filter + Send + Sync>>) -> Self {
+        self.filter = filter;
+        self
+    }
 
-        let pak_collection = PakCollection::from_paths(&self.pak_paths)?;
+    pub fn build(self) -> eyre::Result<PathSearcher<R>> {
+        let pak_collection = if self.pak_source.is_empty() {
+            None
+        } else {
+            Some(PakCollection::from_readers(self.pak_source)?)
+        };
+
         Ok(PathSearcher {
-            pak_collection: Some(pak_collection),
-            ..Default::default()
+            pak_collection,
+            path_cache: DashMap::default(),
+            filter: self.filter,
         })
     }
 }
 
-pub struct PathSearcher<R = io::BufReader<File>> {
+impl PathSearcherBuilder<io::BufReader<File>> {
+    pub fn with_pak_paths(self, paths: &[impl AsRef<Path>]) -> Self {
+        self.with_pak_files(
+            paths
+                .iter()
+                .map(|p| io::BufReader::new(File::open(p).unwrap()))
+                .collect::<Vec<_>>(),
+        )
+    }
+}
+
+pub struct PathSearcher<R> {
     pak_collection: Option<PakCollection<'static, R>>,
     path_cache: DashMap<String, Option<Vec<I18nPakFileInfo>>, FxBuildHasher>,
+    filter: Option<Box<dyn Filter + Send + Sync>>,
 }
 
 impl<R> Default for PathSearcher<R> {
@@ -78,17 +107,16 @@ impl<R> Default for PathSearcher<R> {
         Self {
             pak_collection: None,
             path_cache: DashMap::default(),
+            filter: None,
         }
     }
 }
 
-impl PathSearcher<io::BufReader<File>> {
-    pub fn builder() -> PathSearcherBuilder {
+impl<R> PathSearcher<R> {
+    pub fn builder() -> PathSearcherBuilder<R> {
         PathSearcherBuilder::default()
     }
-}
 
-impl<R> PathSearcher<R> {
     pub fn pak_collection(&self) -> Option<&PakCollection<'static, R>> {
         self.pak_collection.as_ref()
     }
@@ -99,25 +127,34 @@ impl<R> PathSearcher<R> {
             .map(|c| c.path_hashes.len())
             .unwrap_or(0)
     }
-}
 
-impl PathSearcher<io::Cursor<Vec<u8>>> {
-    pub fn from_memory(pak_data: Vec<Vec<u8>>) -> eyre::Result<Self> {
-        if pak_data.is_empty() {
-            return Ok(PathSearcher::default());
+    pub fn with_filter(mut self, filter: Box<dyn Filter + Send + Sync>) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    pub fn with_magic_filter(mut self, filter: Box<dyn Filter + Send + Sync>) -> Self {
+        self.filter = Some(filter);
+        self
+    }
+
+    fn should_skip_file(&self, data: &[u8], file_hash: Option<u64>) -> bool {
+        if let Some(filter) = &self.filter {
+            let context = FileContext {
+                file_size: data.len() as u64,
+                file_hash,
+                data: data.to_vec(),
+            };
+            filter.should_skip_file(&context).unwrap_or_default()
+        } else {
+            false
         }
-
-        let pak_collection = PakCollection::from_memory(&pak_data)?;
-        Ok(PathSearcher {
-            pak_collection: Some(pak_collection),
-            path_cache: DashMap::default(),
-        })
     }
 }
 
 impl<R> PathSearcher<R>
 where
-    R: io::Read + io::Seek + Send,
+    R: Read + Seek + Send,
 {
     pub fn search_memory_dump(&self, dmp_path: &str) -> eyre::Result<SearchResult> {
         fn no_op_progress(_current: u64, _total: u64) {}
@@ -179,7 +216,11 @@ where
             memory_blocks
                 .par_iter()
                 .map(|memory| {
-                    let result = self.search_memory(&memory.data, &unk_paths);
+                    let result = if self.should_skip_file(&memory.data, None) {
+                        Ok(vec![])
+                    } else {
+                        self.search_memory(&memory.data, &unk_paths)
+                    };
                     let mut count = processed.lock();
                     *count += 1;
                     progress.on_progress(*count, memory_blocks.len() as u64);
@@ -224,9 +265,13 @@ where
                 .keys()
                 .par_bridge()
                 .map(|hash| {
-                    let result = pak_collection
-                        .read_file_by_hash(*hash)
-                        .and_then(|file| self.search_memory(&file, &unk_paths));
+                    let result = pak_collection.read_file_by_hash(*hash).and_then(|file| {
+                        if self.should_skip_file(&file, Some(*hash)) {
+                            Ok(vec![])
+                        } else {
+                            self.search_memory(&file, &unk_paths)
+                        }
+                    });
 
                     let count = processed.fetch_add(1, Ordering::Relaxed);
                     progress.on_progress(count, total_files);

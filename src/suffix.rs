@@ -239,7 +239,6 @@ pub static SUFFIX_MAP_FULL: LazyLock<FxHashMap<&'static str, &'static [u32]>> =
         ])
     });
 
-
 #[derive(Debug, Clone)]
 pub struct I18nPakFileInfo {
     pub full_path: String,

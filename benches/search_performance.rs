@@ -53,7 +53,8 @@ fn bench_pak_search_memory(c: &mut Criterion) {
     );
 
     // 创建基于内存的搜索器
-    let memory_searcher = match PathSearcher::from_memory(pak_data) {
+    let readers = pak_data.iter().map(io::Cursor::new);
+    let memory_searcher = match PathSearcher::builder().with_pak_files(readers).build() {
         Ok(searcher) => searcher,
         Err(e) => {
             eprintln!("创建内存搜索器失败: {}", e);

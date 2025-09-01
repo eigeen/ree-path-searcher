@@ -1,6 +1,6 @@
 use std::{
     fs::File,
-    io::{self, Cursor, Read},
+    io::{self, Read, Seek},
     path::Path,
 };
 
@@ -21,44 +21,15 @@ pub struct PakCollection<'a, R> {
     pak_readers: Mutex<Vec<PakArchiveReader<'a, R>>>,
 }
 
-impl PakCollection<'_, io::BufReader<File>> {
-    pub fn from_paths(paths: &[impl AsRef<Path>]) -> eyre::Result<Self> {
-        let mut pak_readers = Vec::with_capacity(paths.len());
+impl<'a, R> PakCollection<'a, R>
+where
+    R: Read + Seek,
+{
+    pub fn from_readers(readers: Vec<R>) -> eyre::Result<Self> {
+        let mut pak_readers = Vec::with_capacity(readers.len());
         let mut path_hashes = FxHashMap::default();
 
-        for (index, path) in paths.iter().enumerate() {
-            let path = path.as_ref();
-            let file = File::open(path).context("Failed to open pak file")?;
-            let mut reader = io::BufReader::new(file);
-            let pak_archive = ree_pak_core::read::read_archive(&mut reader)?;
-            for (entry_index, entry) in pak_archive.entries().iter().enumerate() {
-                path_hashes.insert(
-                    entry.hash(),
-                    PakFileIndex {
-                        archive_index: index,
-                        entry_index,
-                    },
-                );
-            }
-
-            let archive_reader = PakArchiveReader::new_owned(reader, pak_archive);
-            pak_readers.push(archive_reader);
-        }
-
-        Ok(Self {
-            pak_readers: Mutex::new(pak_readers),
-            path_hashes,
-        })
-    }
-}
-
-impl PakCollection<'_, Cursor<Vec<u8>>> {
-    pub fn from_memory(pak_data: &[Vec<u8>]) -> eyre::Result<Self> {
-        let mut pak_readers = Vec::with_capacity(pak_data.len());
-        let mut path_hashes = FxHashMap::default();
-
-        for (index, data) in pak_data.iter().enumerate() {
-            let mut reader = Cursor::new(data.clone());
+        for (index, mut reader) in readers.into_iter().enumerate() {
             let pak_archive = ree_pak_core::read::read_archive(&mut reader)?;
             for (entry_index, entry) in pak_archive.entries().iter().enumerate() {
                 path_hashes.insert(
@@ -83,15 +54,16 @@ impl PakCollection<'_, Cursor<Vec<u8>>> {
 
 pub fn load_pak_files_to_memory(paths: &[impl AsRef<Path>]) -> eyre::Result<Vec<Vec<u8>>> {
     let mut pak_data = Vec::with_capacity(paths.len());
-    
+
     for path in paths.iter() {
         let path = path.as_ref();
         let mut file = File::open(path).context("Failed to open pak file")?;
         let mut data = Vec::new();
-        file.read_to_end(&mut data).context("Failed to read pak file")?;
+        file.read_to_end(&mut data)
+            .context("Failed to read pak file")?;
         pak_data.push(data);
     }
-    
+
     Ok(pak_data)
 }
 

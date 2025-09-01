@@ -68,12 +68,12 @@ fn main() -> eyre::Result<()> {
     let mut builder = PathSearcher::builder();
 
     if !cli.pak.is_empty() {
-        builder = builder.with_pak_files(&cli.pak);
+        builder = builder.with_pak_paths(&cli.pak);
     }
 
     if let Some(pak_list) = &cli.pak_list {
         let paths = load_pak_list(pak_list)?;
-        builder = builder.with_pak_files(&paths);
+        builder = builder.with_pak_paths(&paths);
     }
 
     let searcher = builder.build()?;
