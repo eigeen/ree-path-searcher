@@ -4,9 +4,11 @@ use std::hint::black_box;
 use std::io::{self, BufRead};
 use std::time::Duration;
 
-use ree_path_searcher::{PathSearcher, load_pak_files_to_memory};
+use color_eyre::eyre;
 
-fn load_pak_list(pak_list_file: &str) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+use ree_path_searcher::PathSearcher;
+
+fn load_pak_list(pak_list_file: &str) -> eyre::Result<Vec<String>> {
     let mut pak_file_list = vec![];
     let paks = File::open(pak_list_file)?;
     for line in io::BufReader::new(paks).lines() {
@@ -16,6 +18,15 @@ fn load_pak_list(pak_list_file: &str) -> Result<Vec<String>, Box<dyn std::error:
         }
     }
     Ok(pak_file_list)
+}
+
+fn load_pak_files_to_memory(pak_paths: &[String]) -> eyre::Result<Vec<Vec<u8>>> {
+    let mut pak_data = Vec::new();
+    for path in pak_paths {
+        let data = std::fs::read(path)?;
+        pak_data.push(data);
+    }
+    Ok(pak_data)
 }
 
 fn bench_pak_search_memory(c: &mut Criterion) {
@@ -90,5 +101,5 @@ fn bench_pak_search_memory(c: &mut Criterion) {
     group.finish();
 }
 
-criterion_group!(benches, bench_pak_search_memory,);
+criterion_group!(benches, bench_pak_search_memory);
 criterion_main!(benches);
