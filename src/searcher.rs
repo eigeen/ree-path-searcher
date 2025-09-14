@@ -308,14 +308,14 @@ where
                 if begin < 2 {
                     break;
                 }
-                let earlier = begin - 2;
-                if !accept_char(memory[earlier]) {
+                let prior = begin - 2;
+                if !accept_char(memory[prior]) {
                     break;
                 }
-                if memory[earlier + 1] != 0 {
+                if memory[prior + 1] != 0 {
                     break;
                 }
-                begin = earlier;
+                begin = prior;
             }
             if begin == slash_pos {
                 continue;
@@ -326,14 +326,14 @@ where
                 if end >= memory.len() - 1 {
                     break;
                 }
-                let later = end;
-                if !accept_char(memory[later]) {
+                let next = end;
+                if !accept_char(memory[next]) {
                     break;
                 }
-                if memory[later + 1] != 0 {
+                if memory[next + 1] != 0 {
                     break;
                 }
-                end = later + 2;
+                end = next + 2;
             }
             if end == slash_pos {
                 continue;
