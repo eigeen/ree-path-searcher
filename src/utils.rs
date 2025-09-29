@@ -1,6 +1,6 @@
 /// Creates a string from a slice of u16 values.
 pub fn string_from_utf16_bytes(slice: &[u8]) -> Option<String> {
-    if slice.len() < 2 || slice.len() % 2 != 0 {
+    if slice.len() < 2 || !slice.len().is_multiple_of(2) {
         return None;
     }
 
