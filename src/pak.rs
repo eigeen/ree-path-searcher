@@ -6,7 +6,7 @@ use std::{
 
 use color_eyre::eyre::{self, Context, ContextCompat};
 use parking_lot::Mutex;
-use ree_pak_core::{filename::FileNameExt, read::archive::PakArchiveReader};
+use ree_pak_core::{read::archive::PakArchiveReader, utf16_hash::Utf16HashExt};
 use rustc_hash::FxHashMap;
 
 #[derive(Clone)]
