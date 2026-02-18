@@ -1,6 +1,7 @@
 use std::sync::LazyLock;
 
 use color_eyre::eyre::{self, ContextCompat};
+use ree_pak_core::PakReader;
 use rustc_hash::FxHashMap;
 
 use crate::pak;
@@ -244,7 +245,7 @@ pub struct I18nPakFileInfo {
     pub full_path: String,
 }
 
-pub fn find_path_i18n<R>(
+pub fn find_path_i18n<R: PakReader>(
     pak: &pak::PakCollection<R>,
     mut path: &str,
 ) -> eyre::Result<Vec<I18nPakFileInfo>> {

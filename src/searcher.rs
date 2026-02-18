@@ -3,15 +3,15 @@ mod suffix;
 
 use std::borrow::Cow;
 use std::fs::File;
-use std::io::{self, Read, Seek};
 use std::path::Path;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::Arc;
 
 use color_eyre::eyre::{self, Context};
 use dashmap::DashMap;
 use minidump::{Minidump, MinidumpMemory64List};
 use parking_lot::Mutex;
-use rayon::iter::{IntoParallelRefIterator, ParallelBridge, ParallelExtend, ParallelIterator};
+use rayon::iter::{IntoParallelRefIterator, ParallelExtend, ParallelIterator};
+use ree_pak_core::{CloneableFile, PakReader};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 use suffix::I18nPakFileInfo;
 
@@ -42,19 +42,19 @@ pub struct SearchResult {
 
 pub struct PathSearcherBuilder<R> {
     pak_source: Vec<R>,
-    filter: Option<Box<dyn Filter + Send + Sync>>,
+    filter: Option<Arc<dyn Filter + Send + Sync>>,
 }
 
-impl<R> Default for PathSearcherBuilder<R> {
+impl<R: PakReader> Default for PathSearcherBuilder<R> {
     fn default() -> Self {
         Self {
             pak_source: vec![],
-            filter: Some(Box::new(DefaultFilter)),
+            filter: Some(Arc::new(DefaultFilter)),
         }
     }
 }
 
-impl<R: Read + Seek + Send> PathSearcherBuilder<R> {
+impl<R: PakReader> PathSearcherBuilder<R> {
     pub fn with_pak_file(mut self, reader: R) -> eyre::Result<Self> {
         self.pak_source.push(reader);
         Ok(self)
@@ -65,7 +65,7 @@ impl<R: Read + Seek + Send> PathSearcherBuilder<R> {
         self
     }
 
-    pub fn with_filter(mut self, filter: Option<Box<dyn Filter + Send + Sync>>) -> Self {
+    pub fn with_filter(mut self, filter: Option<Arc<dyn Filter + Send + Sync>>) -> Self {
         self.filter = filter;
         self
     }
@@ -74,66 +74,76 @@ impl<R: Read + Seek + Send> PathSearcherBuilder<R> {
         let pak_collection = if self.pak_source.is_empty() {
             None
         } else {
-            Some(PakCollection::from_readers(self.pak_source)?)
+            Some(Arc::new(PakCollection::from_readers(self.pak_source)?))
         };
 
         Ok(PathSearcher {
             pak_collection,
-            path_cache: DashMap::default(),
+            path_cache: Arc::new(DashMap::default()),
             filter: self.filter,
         })
     }
 }
 
-impl PathSearcherBuilder<io::BufReader<File>> {
+impl PathSearcherBuilder<CloneableFile> {
     pub fn with_pak_paths(self, paths: &[impl AsRef<Path>]) -> Self {
         self.with_pak_files(
             paths
                 .iter()
-                .map(|p| io::BufReader::new(File::open(p).unwrap()))
+                .map(|p| CloneableFile::new(File::open(p).unwrap()))
                 .collect::<Vec<_>>(),
         )
     }
 }
 
-pub struct PathSearcher<R> {
-    pak_collection: Option<PakCollection<'static, R>>,
-    path_cache: DashMap<String, Option<Vec<I18nPakFileInfo>>, FxBuildHasher>,
-    filter: Option<Box<dyn Filter + Send + Sync>>,
+pub struct PathSearcher<R: PakReader> {
+    pak_collection: Option<Arc<PakCollection<R>>>,
+    path_cache: Arc<DashMap<String, Option<Vec<I18nPakFileInfo>>, FxBuildHasher>>,
+    filter: Option<Arc<dyn Filter + Send + Sync>>,
 }
 
-impl<R> Default for PathSearcher<R> {
+impl<R: PakReader> Clone for PathSearcher<R> {
+    fn clone(&self) -> Self {
+        Self {
+            pak_collection: self.pak_collection.clone(),
+            path_cache: Arc::clone(&self.path_cache),
+            filter: self.filter.clone(),
+        }
+    }
+}
+
+impl<R: PakReader> Default for PathSearcher<R> {
     fn default() -> Self {
         Self {
             pak_collection: None,
-            path_cache: DashMap::default(),
+            path_cache: Arc::new(DashMap::default()),
             filter: None,
         }
     }
 }
 
-impl<R> PathSearcher<R> {
+impl<R: PakReader> PathSearcher<R> {
     pub fn builder() -> PathSearcherBuilder<R> {
         PathSearcherBuilder::default()
     }
 
-    pub fn pak_collection(&self) -> Option<&PakCollection<'static, R>> {
-        self.pak_collection.as_ref()
+    pub fn pak_collection(&self) -> Option<&PakCollection<R>> {
+        self.pak_collection.as_deref()
     }
 
     pub fn pak_file_count(&self) -> usize {
         self.pak_collection
             .as_ref()
-            .map(|c| c.path_hashes.len())
+            .map(|c| c.unique_entry_count())
             .unwrap_or(0)
     }
 
-    pub fn with_filter(mut self, filter: Box<dyn Filter + Send + Sync>) -> Self {
+    pub fn with_filter(mut self, filter: Arc<dyn Filter + Send + Sync>) -> Self {
         self.filter = Some(filter);
         self
     }
 
-    pub fn with_magic_filter(mut self, filter: Box<dyn Filter + Send + Sync>) -> Self {
+    pub fn with_magic_filter(mut self, filter: Arc<dyn Filter + Send + Sync>) -> Self {
         self.filter = Some(filter);
         self
     }
@@ -154,7 +164,7 @@ impl<R> PathSearcher<R> {
 
 impl<R> PathSearcher<R>
 where
-    R: Read + Seek + Send,
+    R: PakReader,
 {
     pub fn search_memory_dump(&self, dmp_path: &str) -> eyre::Result<SearchResult> {
         fn no_op_progress(_current: u64, _total: u64) {}
@@ -251,42 +261,85 @@ where
             return Ok(SearchResult::default());
         };
 
-        let mut all_paths: Vec<(String, Vec<I18nPakFileInfo>)> = vec![];
-        let unk_paths = Mutex::new(FxHashSet::default());
+        let all_paths: Arc<Mutex<Vec<(String, Vec<I18nPakFileInfo>)>>> =
+            Arc::new(Mutex::new(vec![]));
+        let unk_paths: Arc<Mutex<FxHashSet<String>>> =
+            Arc::new(Mutex::new(FxHashSet::default()));
 
-        let indexes = pak_collection.path_hashes.clone();
-        let total_files = indexes.len() as u64;
-
+        let total_files = pak_collection.unique_entry_count() as u64;
         progress.on_progress(0, total_files);
 
-        let processed = AtomicU64::new(0);
-        all_paths.par_extend(
-            indexes
-                .keys()
-                .par_bridge()
-                .map(|hash| {
-                    let result = pak_collection.read_file_by_hash(*hash).and_then(|file| {
-                        if self.should_skip_file(&file, Some(*hash)) {
-                            Ok(vec![])
-                        } else {
-                            self.search_memory(&file, &unk_paths)
-                        }
-                    });
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
 
-                    let count = processed.fetch_add(1, Ordering::Relaxed);
+        std::thread::scope(|scope| -> eyre::Result<()> {
+            // Progress updates run on a scoped thread so we don't need `'static` for `progress`.
+            scope.spawn(move || {
+                let mut count = 0u64;
+                while rx.recv().is_ok() {
                     progress.on_progress(count, total_files);
+                    count += 1;
+                }
+            });
 
-                    result
-                })
-                .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
-        );
+            for (pak_index, pak) in pak_collection.pak_files().iter().enumerate() {
+                let searcher = self.clone();
+                let all_paths = Arc::clone(&all_paths);
+                let unk_paths = Arc::clone(&unk_paths);
+                let tx = tx.clone();
+                let pak_collection = Arc::clone(pak_collection);
+                let seen_hashes: Arc<Mutex<FxHashSet<u64>>> =
+                    Arc::new(Mutex::new(FxHashSet::default()));
+                let seen_hashes = Arc::clone(&seen_hashes);
+
+                pak.extractor_callback()
+                    .parallel(true)
+                    .run_with_bytes(move |entry, _rel_path, bytes| {
+                        let hash = entry.hash();
+
+                        // Match the previous behavior where later PAKs overwrite earlier ones.
+                        if !pak_collection.should_scan_hash_in_pak(hash, pak_index) {
+                            return Ok(());
+                        }
+
+                        // Avoid scanning the same hash multiple times within the same PAK.
+                        if !seen_hashes.lock().insert(hash) {
+                            return Ok(());
+                        }
+
+                        if !searcher.should_skip_file(&bytes, Some(hash)) {
+                            let paths = searcher
+                                .search_memory(&bytes, unk_paths.as_ref())
+                                .map_err(|e| {
+                                    std::io::Error::new(std::io::ErrorKind::Other, e)
+                                })?;
+                            if !paths.is_empty() {
+                                all_paths.lock().extend(paths);
+                            }
+                        }
+
+                        let _ = tx.send(());
+
+                        Ok(())
+                    })?;
+            }
+
+            // Close the progress channel so the scoped thread can exit.
+            drop(tx);
+            Ok(())
+        })?;
+
+        let mut all_paths = Arc::try_unwrap(all_paths)
+            .map_err(|_| eyre::eyre!("all_paths still shared"))?
+            .into_inner();
 
         all_paths.sort_by(|(p, _), (q, _)| p.cmp(q));
         all_paths.dedup_by(|(p, _), (q, _)| p == q);
 
         Ok(SearchResult {
             found_paths: all_paths,
-            unknown_paths: unk_paths.into_inner(),
+            unknown_paths: Arc::try_unwrap(unk_paths)
+                .map_err(|_| eyre::eyre!("unknown_paths still shared"))?
+                .into_inner(),
         })
     }
 

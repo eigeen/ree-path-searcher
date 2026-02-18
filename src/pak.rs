@@ -1,54 +1,60 @@
 use std::{
     fs::File,
-    io::{self, Read, Seek},
+    io::Read,
     path::Path,
 };
 
-use color_eyre::eyre::{self, Context, ContextCompat};
-use parking_lot::Mutex;
-use ree_pak_core::{read::archive::PakArchiveReader, utf16_hash::Utf16HashExt};
-use rustc_hash::FxHashMap;
-
-#[derive(Clone)]
-pub struct PakFileIndex {
-    archive_index: usize,
-    entry_index: usize,
-}
+use color_eyre::eyre::{self, Context};
+use ree_pak_core::{utf16_hash::Utf16HashExt, PakFile, PakReader};
+use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Multiple PAK archive collection.
-pub struct PakCollection<'a, R> {
-    pub path_hashes: FxHashMap<u64, PakFileIndex>,
-    pak_readers: Mutex<Vec<PakArchiveReader<'a, R>>>,
+pub struct PakCollection<R: PakReader> {
+    entry_hashes: FxHashSet<u64>,
+    last_pak_for_hash: FxHashMap<u64, usize>,
+    pak_files: Vec<PakFile<R>>,
 }
 
-impl<'a, R> PakCollection<'a, R>
+impl<R> PakCollection<R>
 where
-    R: Read + Seek,
+    R: PakReader,
 {
     pub fn from_readers(readers: Vec<R>) -> eyre::Result<Self> {
-        let mut pak_readers = Vec::with_capacity(readers.len());
-        let mut path_hashes = FxHashMap::default();
+        let mut pak_files = Vec::with_capacity(readers.len());
+        let mut entry_hashes = FxHashSet::default();
+        let mut last_pak_for_hash = FxHashMap::default();
 
-        for (index, mut reader) in readers.into_iter().enumerate() {
-            let pak_archive = ree_pak_core::read::read_archive(&mut reader)?;
-            for (entry_index, entry) in pak_archive.entries().iter().enumerate() {
-                path_hashes.insert(
-                    entry.hash(),
-                    PakFileIndex {
-                        archive_index: index,
-                        entry_index,
-                    },
-                );
+        for (index, reader) in readers.into_iter().enumerate() {
+            let pak_file = PakFile::from_reader(reader)?;
+            for entry in pak_file.metadata().entries().iter() {
+                let hash = entry.hash();
+                entry_hashes.insert(hash);
+                last_pak_for_hash.insert(hash, index);
             }
 
-            let archive_reader = PakArchiveReader::new_owned(reader, pak_archive);
-            pak_readers.push(archive_reader);
+            pak_files.push(pak_file);
         }
 
         Ok(Self {
-            pak_readers: Mutex::new(pak_readers),
-            path_hashes,
+            pak_files,
+            entry_hashes,
+            last_pak_for_hash,
         })
+    }
+
+    pub fn pak_files(&self) -> &[PakFile<R>] {
+        &self.pak_files
+    }
+
+    pub fn unique_entry_count(&self) -> usize {
+        self.entry_hashes.len()
+    }
+
+    /// Return true if this `(pak_index, hash)` is the chosen “winner” for scanning.
+    ///
+    /// This matches the previous behavior where later PAKs overwrite earlier ones in the hash index.
+    pub fn should_scan_hash_in_pak(&self, hash: u64, pak_index: usize) -> bool {
+        self.last_pak_for_hash.get(&hash).copied() == Some(pak_index)
     }
 }
 
@@ -67,30 +73,12 @@ pub fn load_pak_files_to_memory(paths: &[impl AsRef<Path>]) -> eyre::Result<Vec<
     Ok(pak_data)
 }
 
-impl<R> PakCollection<'_, R> {
+impl<R> PakCollection<R>
+where
+    R: PakReader,
+{
     pub fn contains_path(&self, path: &str) -> bool {
         let hash = path.hash_mixed();
-        self.path_hashes.contains_key(&hash)
-    }
-}
-
-impl<R> PakCollection<'_, R>
-where
-    R: io::Read + io::Seek,
-{
-    pub fn read_file_by_hash(&self, hash: u64) -> eyre::Result<Vec<u8>> {
-        let file_info = self
-            .path_hashes
-            .get(&hash)
-            .context("File not found in any pak")?;
-
-        let mut _pak_readers = self.pak_readers.lock();
-        let reader = &mut _pak_readers[file_info.archive_index];
-        let mut entry_reader = reader.owned_entry_reader_by_index(file_info.entry_index)?;
-
-        let mut buf = vec![];
-        entry_reader.read_to_end(&mut buf)?;
-
-        Ok(buf)
+        self.entry_hashes.contains(&hash)
     }
 }
