@@ -5,6 +5,7 @@ use std::borrow::Cow;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 
 use color_eyre::eyre::{self, Context};
 use dashmap::DashMap;
@@ -90,7 +91,7 @@ impl PathSearcherBuilder<CloneableFile> {
         self.with_pak_files(
             paths
                 .iter()
-                .map(|p| CloneableFile::new(File::open(p).unwrap()))
+                .map(|p| CloneableFile::new(File::open(p).unwrap()).unwrap())
                 .collect::<Vec<_>>(),
         )
     }
@@ -221,7 +222,7 @@ where
 
         progress.on_progress(0, memory_blocks.len() as u64);
 
-        let processed = Mutex::new(0u64);
+        let processed = AtomicU64::new(0);
         all_paths.par_extend(
             memory_blocks
                 .par_iter()
@@ -231,9 +232,8 @@ where
                     } else {
                         self.search_memory(&memory.data, &unk_paths)
                     };
-                    let mut count = processed.lock();
-                    *count += 1;
-                    progress.on_progress(*count, memory_blocks.len() as u64);
+                    let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
+                    progress.on_progress(count, memory_blocks.len() as u64);
                     result
                 })
                 .flat_map_iter(|paths: eyre::Result<_>| paths.unwrap()),
@@ -261,72 +261,59 @@ where
             return Ok(SearchResult::default());
         };
 
+        #[allow(clippy::type_complexity)]
         let all_paths: Arc<Mutex<Vec<(String, Vec<I18nPakFileInfo>)>>> =
             Arc::new(Mutex::new(vec![]));
-        let unk_paths: Arc<Mutex<FxHashSet<String>>> =
-            Arc::new(Mutex::new(FxHashSet::default()));
+        let unk_paths: Arc<Mutex<FxHashSet<String>>> = Arc::new(Mutex::new(FxHashSet::default()));
 
         let total_files = pak_collection.unique_entry_count() as u64;
         progress.on_progress(0, total_files);
 
-        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        let processed = Arc::new(AtomicU64::new(0));
 
-        std::thread::scope(|scope| -> eyre::Result<()> {
-            // Progress updates run on a scoped thread so we don't need `'static` for `progress`.
-            scope.spawn(move || {
-                let mut count = 0u64;
-                while rx.recv().is_ok() {
+        for (pak_index, pak) in pak_collection.pak_files().iter().enumerate() {
+            let searcher = self.clone();
+            let all_paths = Arc::clone(&all_paths);
+            let unk_paths = Arc::clone(&unk_paths);
+            let processed = Arc::clone(&processed);
+
+            let allowed_hashes: FxHashSet<u64> = pak
+                .metadata()
+                .entries()
+                .iter()
+                .map(|entry| entry.hash())
+                .filter(|&hash| pak_collection.should_scan_hash_in_pak(hash, pak_index))
+                .collect();
+
+            let seen_hashes = Mutex::new(FxHashSet::default());
+
+            pak.extractor_callback()
+                .parallel(true)
+                .continue_on_error(true)
+                .filter(move |entry, _path| {
+                    let hash = entry.hash();
+                    if !allowed_hashes.contains(&hash) {
+                        return false;
+                    }
+                    // Avoid scanning the same hash multiple times within the same PAK.
+                    seen_hashes.lock().insert(hash)
+                })
+                .run_with_bytes(|entry, _rel_path, bytes| {
+                    let hash = entry.hash();
+
+                    if !searcher.should_skip_file(&bytes, Some(hash))
+                        && let Ok(paths) = searcher.search_memory(&bytes, unk_paths.as_ref())
+                        && !paths.is_empty()
+                    {
+                        all_paths.lock().extend(paths);
+                    }
+
+                    let count = processed.fetch_add(1, Ordering::Relaxed) + 1;
                     progress.on_progress(count, total_files);
-                    count += 1;
-                }
-            });
 
-            for (pak_index, pak) in pak_collection.pak_files().iter().enumerate() {
-                let searcher = self.clone();
-                let all_paths = Arc::clone(&all_paths);
-                let unk_paths = Arc::clone(&unk_paths);
-                let tx = tx.clone();
-                let pak_collection = Arc::clone(pak_collection);
-                let seen_hashes: Arc<Mutex<FxHashSet<u64>>> =
-                    Arc::new(Mutex::new(FxHashSet::default()));
-                let seen_hashes = Arc::clone(&seen_hashes);
-
-                pak.extractor_callback()
-                    .parallel(true)
-                    .run_with_bytes(move |entry, _rel_path, bytes| {
-                        let hash = entry.hash();
-
-                        // Match the previous behavior where later PAKs overwrite earlier ones.
-                        if !pak_collection.should_scan_hash_in_pak(hash, pak_index) {
-                            return Ok(());
-                        }
-
-                        // Avoid scanning the same hash multiple times within the same PAK.
-                        if !seen_hashes.lock().insert(hash) {
-                            return Ok(());
-                        }
-
-                        if !searcher.should_skip_file(&bytes, Some(hash)) {
-                            let paths = searcher
-                                .search_memory(&bytes, unk_paths.as_ref())
-                                .map_err(|e| {
-                                    std::io::Error::new(std::io::ErrorKind::Other, e)
-                                })?;
-                            if !paths.is_empty() {
-                                all_paths.lock().extend(paths);
-                            }
-                        }
-
-                        let _ = tx.send(());
-
-                        Ok(())
-                    })?;
-            }
-
-            // Close the progress channel so the scoped thread can exit.
-            drop(tx);
-            Ok(())
-        })?;
+                    Ok(())
+                })?;
+        }
 
         let mut all_paths = Arc::try_unwrap(all_paths)
             .map_err(|_| eyre::eyre!("all_paths still shared"))?

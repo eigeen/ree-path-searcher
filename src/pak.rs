@@ -1,11 +1,7 @@
-use std::{
-    fs::File,
-    io::Read,
-    path::Path,
-};
+use std::{fs::File, io::Read, path::Path};
 
 use color_eyre::eyre::{self, Context};
-use ree_pak_core::{utf16_hash::Utf16HashExt, PakFile, PakReader};
+use ree_pak_core::{PakFile, PakReader, utf16_hash::Utf16HashExt};
 use rustc_hash::{FxHashMap, FxHashSet};
 
 /// Multiple PAK archive collection.

@@ -111,9 +111,9 @@ dependencies = [
 
 [[package]]
 name = "bitflags"
-version = "2.9.4"
+version = "2.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2261d10cca569e4643e526d8dc2e62e433cc8aba21ab764233731f8d369bf394"
+checksum = "843867be96c8daad0d758b57df9392b6d8d271134fce549de6ce169ff98a92af"
 
 [[package]]
 name = "bumpalo"
@@ -991,14 +991,15 @@ dependencies = [
 
 [[package]]
 name = "ree-pak-core"
-version = "0.5.0"
-source = "git+https://github.com/eigeen/ree-pak-rs.git#f1052e9a8cb9b3f16440ed3744180f64a9edeb31"
+version = "0.7.1"
+source = "git+https://github.com/eigeen/ree-pak-rs.git?rev=6dad4aec8982735067ed8c19cf05027d9448cc67#6dad4aec8982735067ed8c19cf05027d9448cc67"
 dependencies = [
  "bitflags",
  "byteorder",
  "derive_more",
  "flate2",
  "indexmap",
+ "memmap2",
  "murmur3",
  "nohash",
  "num",
@@ -1014,7 +1015,7 @@ dependencies = [
 
 [[package]]
 name = "ree-path-searcher"
-version = "0.2.0"
+version = "0.2.1"
 dependencies = [
  "clap",
  "color-eyre",
