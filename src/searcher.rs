@@ -16,6 +16,7 @@ use ree_pak_core::{CloneableFile, PakReader};
 use rustc_hash::{FxBuildHasher, FxHashSet};
 use suffix::I18nPakFileInfo;
 
+use crate::config::PathSearcherConfig;
 use crate::pak::PakCollection;
 use crate::searcher::filter::{DefaultFilter, FileContext, Filter};
 use crate::utils;
@@ -44,6 +45,7 @@ pub struct SearchResult {
 pub struct PathSearcherBuilder<R> {
     pak_source: Vec<R>,
     filter: Option<Arc<dyn Filter + Send + Sync>>,
+    config: Arc<PathSearcherConfig>,
 }
 
 impl<R: PakReader> Default for PathSearcherBuilder<R> {
@@ -51,6 +53,7 @@ impl<R: PakReader> Default for PathSearcherBuilder<R> {
         Self {
             pak_source: vec![],
             filter: Some(Arc::new(DefaultFilter)),
+            config: Arc::new(PathSearcherConfig::default()),
         }
     }
 }
@@ -71,6 +74,16 @@ impl<R: PakReader> PathSearcherBuilder<R> {
         self
     }
 
+    pub fn with_config(mut self, config: PathSearcherConfig) -> Self {
+        self.config = Arc::new(config);
+        self
+    }
+
+    pub fn with_config_arc(mut self, config: Arc<PathSearcherConfig>) -> Self {
+        self.config = config;
+        self
+    }
+
     pub fn build(self) -> eyre::Result<PathSearcher<R>> {
         let pak_collection = if self.pak_source.is_empty() {
             None
@@ -82,6 +95,7 @@ impl<R: PakReader> PathSearcherBuilder<R> {
             pak_collection,
             path_cache: Arc::new(DashMap::default()),
             filter: self.filter,
+            config: self.config,
         })
     }
 }
@@ -101,6 +115,7 @@ pub struct PathSearcher<R: PakReader> {
     pak_collection: Option<Arc<PakCollection<R>>>,
     path_cache: Arc<DashMap<String, Option<Vec<I18nPakFileInfo>>, FxBuildHasher>>,
     filter: Option<Arc<dyn Filter + Send + Sync>>,
+    config: Arc<PathSearcherConfig>,
 }
 
 impl<R: PakReader> Clone for PathSearcher<R> {
@@ -109,6 +124,7 @@ impl<R: PakReader> Clone for PathSearcher<R> {
             pak_collection: self.pak_collection.clone(),
             path_cache: Arc::clone(&self.path_cache),
             filter: self.filter.clone(),
+            config: Arc::clone(&self.config),
         }
     }
 }
@@ -119,6 +135,7 @@ impl<R: PakReader> Default for PathSearcher<R> {
             pak_collection: None,
             path_cache: Arc::new(DashMap::default()),
             filter: None,
+            config: Arc::new(PathSearcherConfig::default()),
         }
     }
 }
@@ -130,6 +147,10 @@ impl<R: PakReader> PathSearcher<R> {
 
     pub fn pak_collection(&self) -> Option<&PakCollection<R>> {
         self.pak_collection.as_deref()
+    }
+
+    pub fn config(&self) -> &PathSearcherConfig {
+        &self.config
     }
 
     pub fn pak_file_count(&self) -> usize {
@@ -401,7 +422,7 @@ where
                 }
 
                 // Perform lookup
-                let Ok(file_hashes) = suffix::find_path_i18n(pak, &path) else {
+                let Ok(file_hashes) = suffix::find_path_i18n(pak, &self.config, &path) else {
                     // No result
                     unk_paths.lock().insert(path.clone());
                     // Also cache empty result

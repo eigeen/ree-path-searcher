@@ -1,6 +1,6 @@
 [package]
 name = "ree-path-searcher"
-version = "0.2.1"
+version = "0.3.0"
 edition = "2024"
 
 [lib]
@@ -28,6 +28,8 @@ rustc-hash = "2.1"
 indicatif = "0.18"
 dashmap = "6.1"
 num_cpus = "1.17.0"
+serde = { version = "1", features = ["derive"] }
+toml = "0.9"
 
 [features]
 default = []

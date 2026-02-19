@@ -13,12 +13,30 @@ A Rust tool for extracting file paths from RE Engine game PAK files and memory d
 # Multiple PAK files
 ./ree-path-searcher.exe --pak <pak_file_path_1> --pak <pak_file_path_2>
 # or input a list file, each line is a PAK file path
-./ree-path-searcher.exe --pak_list <pak_list_file>
+./ree-path-searcher.exe --pak-list <pak_list_file>
+
+# Use a custom resolver config (languages/prefixes/suffix map)
+./ree-path-searcher.exe --config path_searcher.toml --pak <pak_file_path>
+
+# If --config is not specified, the tool will try to load ./config.toml automatically.
 ```
 
 ## Library Usage
 
 To use this as a library, refer to [src/main.rs](src/main.rs) for implementation examples.
+
+### Config (TOML)
+
+```toml
+# path_searcher.toml
+languages = ["Ja", "En"]
+prefixes = ["natives/STM/"]
+use_builtin_suffix_map = true
+
+[suffix_map]
+# extension = [version1, version2, ...]
+gtex = [240701004, 241106030]
+```
 
 ---
 
@@ -37,9 +55,27 @@ To use this as a library, refer to [src/main.rs](src/main.rs) for implementation
 # 多个PAK文件
 ./ree-path-searcher.exe --pak <pak_file_path_1> --pak <pak_file_path_2>
 # 或输入一个列表文件，每行是一个PAK文件路径
-./ree-path-searcher.exe --pak_list <pak_list_file>
+./ree-path-searcher.exe --pak-list <pak_list_file>
+
+# 使用自定义解析配置（语言/前缀/后缀版本覆盖）
+./ree-path-searcher.exe --config path_searcher.toml --pak <pak_file_path>
+
+# 如果未指定 --config，会自动尝试加载当前目录下的 ./config.toml
 ```
 
 ## 作为库使用
 
 如需作为库使用，请参考 [src/main.rs](src/main.rs) 文件中的实现示例。
+
+### 配置文件（TOML）
+
+```toml
+# path_searcher.toml
+languages = ["Ja", "En"]
+prefixes = ["natives/STM/"]
+use_builtin_suffix_map = true
+
+[suffix_map]
+# 扩展名 = [版本1, 版本2, ...]
+gtex = [240701004, 241106030]
+```

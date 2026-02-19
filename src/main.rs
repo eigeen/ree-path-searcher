@@ -1,13 +1,14 @@
 use std::{
     fs::File,
     io::{self, BufRead, Write},
+    path::Path,
     time::{Duration, Instant},
 };
 
 use clap::Parser;
 use color_eyre::eyre;
 use indicatif::{ProgressBar, ProgressStyle};
-use ree_path_searcher::{PathSearcher, SearchResult};
+use ree_path_searcher::{PathSearcher, PathSearcherConfig, SearchResult};
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -23,6 +24,18 @@ struct Cli {
     /// Number of threads to use.
     #[arg(long)]
     threads: Option<usize>,
+    /// TOML config for language/prefix/suffix resolving.
+    #[arg(long)]
+    config: Option<String>,
+}
+
+#[derive(Debug)]
+struct AppConfig {
+    pak: Vec<String>,
+    pak_list: Option<String>,
+    dmp: Vec<String>,
+    threads: Option<usize>,
+    searcher_config: PathSearcherConfig,
 }
 
 fn load_pak_list(pak_list_file: &str) -> eyre::Result<Vec<String>> {
@@ -56,18 +69,16 @@ fn export_results(result: &SearchResult) -> eyre::Result<()> {
     Ok(())
 }
 
-fn main() -> eyre::Result<()> {
-    color_eyre::install()?;
-
-    let cli = Cli::parse();
-
-    if cli.pak.is_empty() && cli.pak_list.is_none() && cli.dmp.is_empty() {
-        eprintln!("Error: No PAK or DMP files specified. Use --pak, --pak-list, or --dmp options.");
+fn run(app: AppConfig) -> eyre::Result<()> {
+    if app.pak.is_empty() && app.pak_list.is_none() && app.dmp.is_empty() {
+        eprintln!(
+            "Error: No PAK or DMP files specified in cli arguments or config file. Use --pak, --pak-list, or --dmp options."
+        );
         std::process::exit(1);
     }
 
     // set rayon threads
-    let threads = if let Some(threads) = cli.threads {
+    let threads = if let Some(threads) = app.threads {
         threads.min(num_cpus::get())
     } else {
         num_cpus::get().min(8)
@@ -80,18 +91,20 @@ fn main() -> eyre::Result<()> {
 
     let mut builder = PathSearcher::builder();
 
-    if !cli.pak.is_empty() {
-        builder = builder.with_pak_paths(&cli.pak);
+    builder = builder.with_config(app.searcher_config);
+
+    if !app.pak.is_empty() {
+        builder = builder.with_pak_paths(&app.pak);
     }
 
-    if let Some(pak_list) = &cli.pak_list {
+    if let Some(pak_list) = &app.pak_list {
         let paths = load_pak_list(pak_list)?;
         builder = builder.with_pak_paths(&paths);
     }
 
     let searcher = builder.build()?;
 
-    if !cli.pak.is_empty() || cli.pak_list.is_some() {
+    if !app.pak.is_empty() || app.pak_list.is_some() {
         println!("Input pak total file count: {}", searcher.pak_file_count());
     }
 
@@ -100,8 +113,8 @@ fn main() -> eyre::Result<()> {
         unknown_paths: rustc_hash::FxHashSet::default(),
     };
 
-    if !cli.dmp.is_empty() {
-        for dmp in &cli.dmp {
+    if !app.dmp.is_empty() {
+        for dmp in &app.dmp {
             eprintln!("Scanning {dmp}..");
             let progress_bar = ProgressBar::new(100);
             progress_bar.enable_steady_tick(Duration::from_millis(100));
@@ -160,4 +173,32 @@ fn main() -> eyre::Result<()> {
     println!("Elapsed: {:.2?} seconds", elapsed.as_secs_f32());
 
     Ok(())
+}
+
+fn main() -> eyre::Result<()> {
+    color_eyre::install()?;
+
+    let cli = Cli::parse();
+
+    let searcher_config = if let Some(path) = &cli.config {
+        println!("Loading config from {}", path);
+        PathSearcherConfig::from_toml_file(path)?
+    } else {
+        let default_path = Path::new("config.toml");
+        if default_path.exists() {
+            println!("Loading config from {}", default_path.display());
+            PathSearcherConfig::from_toml_file(default_path)?
+        } else {
+            println!("Using built-in config");
+            PathSearcherConfig::default()
+        }
+    };
+
+    run(AppConfig {
+        pak: cli.pak,
+        pak_list: cli.pak_list,
+        dmp: cli.dmp,
+        threads: cli.threads,
+        searcher_config,
+    })
 }
