@@ -2,6 +2,7 @@ mod filter;
 mod suffix;
 
 use std::borrow::Cow;
+use std::fmt::Write as _;
 use std::fs::File;
 use std::path::Path;
 use std::sync::Arc;
@@ -18,6 +19,7 @@ use suffix::I18nPakFileInfo;
 
 use crate::config::PathSearcherConfig;
 use crate::pak::PakCollection;
+use crate::path_components::PathComponents;
 use crate::searcher::filter::{DefaultFilter, FileContext, Filter};
 use crate::utils;
 
@@ -158,6 +160,60 @@ impl<R: PakReader> PathSearcher<R> {
             .as_ref()
             .map(|c| c.unique_entry_count())
             .unwrap_or(0)
+    }
+
+    pub fn resolve_reference_line(&self, line: &str) -> eyre::Result<Vec<I18nPakFileInfo>> {
+        let Some(pak) = &self.pak_collection else {
+            return Ok(vec![]);
+        };
+
+        let Some(parts) = PathComponents::parse(line, self.config()) else {
+            return Ok(vec![]);
+        };
+
+        // already a full path that exists in PAKs.
+        if pak.contains_path(parts.normalized_full_path()) {
+            return Ok(vec![I18nPakFileInfo {
+                full_path: parts.into_normalized_full_path(),
+            }]);
+        }
+
+        // only the numeric version differs; keep everything else intact.
+        if let (Some(version_range), Some(ext)) = (parts.version_range(), parts.extension())
+            && let Some(versions) = self.config().suffix_versions(ext)
+        {
+            let normalized = parts.normalized_full_path();
+            let base = &normalized[..version_range.start];
+            let tail = &normalized[version_range.end..];
+
+            let mut result = vec![];
+            let mut candidate = String::with_capacity(normalized.len() + 16);
+            for &v in versions {
+                candidate.clear();
+                candidate.push_str(base);
+                let _ = write!(&mut candidate, "{v}");
+                candidate.push_str(tail);
+
+                if pak.contains_path(candidate.as_str()) {
+                    result.push(I18nPakFileInfo {
+                        full_path: candidate.clone(),
+                    });
+                }
+            }
+
+            if !result.is_empty() {
+                return Ok(result);
+            }
+        }
+
+        let raw_path = parts.raw_path();
+        if pak.contains_path(raw_path) {
+            return Ok(vec![I18nPakFileInfo {
+                full_path: raw_path.to_string(),
+            }]);
+        }
+
+        suffix::find_path_i18n(pak, &self.config, &parts)
     }
 
     pub fn with_filter(mut self, filter: Arc<dyn Filter + Send + Sync>) -> Self {
@@ -409,33 +465,48 @@ where
                 continue;
             }
 
+            let Some(parts) = PathComponents::parse(&path, &self.config) else {
+                continue;
+            };
+            let raw_path = parts.raw_path().to_string();
+
             if let Some(pak) = &self.pak_collection {
                 // Check cache first
-                if let Some(cached_result) = self.path_cache.get(&path) {
+                if let Some(cached_result) = self.path_cache.get(raw_path.as_str()) {
                     // Cache hit
                     if let Some(cached_result) = cached_result.value() {
-                        paths.push((path, cached_result.clone()));
+                        paths.push((raw_path, cached_result.clone()));
                     } else {
                         // If stores None, then ignore
                     }
                     continue;
                 }
 
-                // Perform lookup
-                let Ok(file_hashes) = suffix::find_path_i18n(pak, &self.config, &path) else {
-                    // No result
-                    unk_paths.lock().insert(path.clone());
-                    // Also cache empty result
-                    self.path_cache.insert(path, None);
+                // Fast path: already a full path that exists in PAKs.
+                if pak.contains_path(parts.normalized_full_path()) {
+                    let full = parts.clone().into_normalized_full_path();
+                    let infos = vec![I18nPakFileInfo { full_path: full }];
+                    self.path_cache
+                        .insert(raw_path.clone(), Some(infos.clone()));
+                    paths.push((raw_path, infos));
                     continue;
-                };
+                }
+
+                // Perform lookup
+                let file_hashes =
+                    suffix::find_path_i18n(pak, &self.config, &parts).unwrap_or_default();
+                if file_hashes.is_empty() {
+                    unk_paths.lock().insert(raw_path.clone());
+                    self.path_cache.insert(raw_path, None);
+                    continue;
+                }
 
                 // Cache the result
                 self.path_cache
-                    .insert(path.clone(), Some(file_hashes.clone()));
-                paths.push((path, file_hashes));
+                    .insert(raw_path.clone(), Some(file_hashes.clone()));
+                paths.push((raw_path, file_hashes));
             } else {
-                paths.push((path, vec![]));
+                paths.push((raw_path, vec![]));
             }
         }
 

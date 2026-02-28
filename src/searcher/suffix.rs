@@ -3,6 +3,7 @@ use ree_pak_core::PakReader;
 
 use crate::config::PathSearcherConfig;
 use crate::pak;
+use crate::path_components::PathComponents;
 
 #[derive(Debug, Clone)]
 pub struct I18nPakFileInfo {
@@ -12,28 +13,10 @@ pub struct I18nPakFileInfo {
 pub fn find_path_i18n<R: PakReader>(
     pak: &pak::PakCollection<R>,
     config: &PathSearcherConfig,
-    mut path: &str,
+    parts: &PathComponents<'_>,
 ) -> eyre::Result<Vec<I18nPakFileInfo>> {
-    if path.starts_with('@') || path.starts_with('/') {
-        path = &path[1..];
-    }
-    // strip prefix
-    for prefix in config.prefixes() {
-        if let Some(prefix_pos) = path.find(prefix.as_str()) {
-            path = &path[(prefix_pos + prefix.len())..];
-            break;
-        }
-    }
-    // strip suffix
-    let mut dot = path.rfind('.').context("Path missing extension")?;
-    let ext = &path[dot + 1..];
-    if ext.chars().all(|c| c.is_ascii_digit()) {
-        // pure number, is suffix
-        path = &path[..dot];
-        dot = path.rfind('.').context("Path missing extension")?;
-    }
-
-    let ext = &path[dot + 1..];
+    let path = parts.raw_path();
+    let ext = parts.extension().context("Path missing extension")?;
     let suffix = config
         .suffix_versions(ext)
         .context(format!("Unknown extension: {ext}"))?;

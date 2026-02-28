@@ -2,12 +2,16 @@ use std::{
     fs::File,
     io::{self, BufRead, Write},
     path::Path,
+    sync::atomic::{AtomicUsize, Ordering},
     time::{Duration, Instant},
 };
 
 use clap::Parser;
 use color_eyre::eyre;
+use dashmap::DashSet;
 use indicatif::{ProgressBar, ProgressStyle};
+use parking_lot::Mutex;
+use rayon::prelude::*;
 use ree_pak_core::utf16_hash::Utf16HashExt;
 use ree_path_searcher::{PathSearcher, PathSearcherConfig, SearchResult};
 use rustc_hash::FxHashSet;
@@ -71,28 +75,6 @@ fn load_ref_list(ref_list_file: &str) -> eyre::Result<Vec<String>> {
 
 fn canonicalize_ref_path(path: &str) -> String {
     path.trim().replace('\\', "/")
-}
-
-fn resolve_reference_path<R: ree_pak_core::PakReader>(
-    pak: &ree_path_searcher::pak::PakCollection<R>,
-    line: &str,
-) -> Option<String> {
-    let line = line.trim();
-    if line.is_empty() || line.starts_with('#') {
-        return None;
-    }
-
-    let original = line.trim_start_matches(['@', '/']).replace('\\', "/");
-    if pak.contains_path(&original) {
-        return Some(original);
-    }
-
-    let canonical = canonicalize_ref_path(&original);
-    if pak.contains_path(&canonical) {
-        return Some(canonical);
-    }
-
-    None
 }
 
 fn export_results(result: &SearchResult, extra_full_paths: &[String]) -> eyre::Result<()> {
@@ -223,29 +205,65 @@ fn run(app: AppConfig) -> eyre::Result<()> {
     // resolve reference list if provided
     let mut ref_matched_full_paths: Vec<String> = vec![];
     if !app.ref_list.is_empty() {
-        if let Some(pak) = searcher.pak_collection() {
+        if searcher.pak_collection().is_some() {
             let mut refs: Vec<String> = vec![];
             for file in &app.ref_list {
                 refs.extend(load_ref_list(file)?);
             }
 
-            let mut matched = FxHashSet::default();
-            let mut missing_count = 0usize;
-            for r in refs {
-                if let Some(full_path) = resolve_reference_path(pak, &r) {
-                    matched.insert(canonicalize_ref_path(&full_path));
-                } else {
-                    missing_count += 1;
+            eprintln!("Resolving reference list..");
+            let progress_bar = ProgressBar::new(refs.len() as u64);
+            progress_bar.enable_steady_tick(Duration::from_millis(100));
+            progress_bar.set_style(
+                ProgressStyle::default_bar()
+                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}")
+                    .unwrap()
+                    .progress_chars("##-"),
+            );
+
+            let matched: DashSet<String> = DashSet::default();
+            let missing_count = AtomicUsize::new(0);
+            let error_count = AtomicUsize::new(0);
+            let first_errors: Mutex<Vec<(String, String)>> = Mutex::new(vec![]);
+
+            let pb = progress_bar.clone();
+            refs.par_iter().for_each(|r| {
+                match searcher.resolve_reference_line(r) {
+                    Ok(infos) if !infos.is_empty() => {
+                        for info in infos {
+                            matched.insert(canonicalize_ref_path(&info.full_path));
+                        }
+                    }
+                    Ok(_) => {
+                        missing_count.fetch_add(1, Ordering::Relaxed);
+                    }
+                    Err(err) => {
+                        error_count.fetch_add(1, Ordering::Relaxed);
+                        let mut guard = first_errors.lock();
+                        if guard.len() < 5 {
+                            guard.push((r.clone(), format!("{err:#}")));
+                        }
+                    }
                 }
-            }
+                pb.inc(1);
+            });
+            progress_bar.finish_with_message("Resolve reference list finished.");
 
             ref_matched_full_paths = matched.into_iter().collect();
             ref_matched_full_paths.sort_unstable();
             eprintln!(
-                "Reference list: matched {} paths, missing {}.",
+                "Reference list: matched {} paths, missing {}, errors {}.",
                 ref_matched_full_paths.len(),
-                missing_count
+                missing_count.load(Ordering::Relaxed),
+                error_count.load(Ordering::Relaxed)
             );
+            let first_errors = first_errors.into_inner();
+            if !first_errors.is_empty() {
+                eprintln!("Reference list: first {} errors:", first_errors.len());
+                for (line, err) in first_errors {
+                    eprintln!("  - {line}: {err}");
+                }
+            }
         } else {
             eprintln!(
                 "Warning: --ref-list provided but no PAK files loaded; skipping reference checks."
