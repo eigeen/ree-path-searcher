@@ -8,7 +8,9 @@ use std::{
 use clap::Parser;
 use color_eyre::eyre;
 use indicatif::{ProgressBar, ProgressStyle};
+use ree_pak_core::utf16_hash::Utf16HashExt;
 use ree_path_searcher::{PathSearcher, PathSearcherConfig, SearchResult};
+use rustc_hash::FxHashSet;
 
 #[derive(Debug, Parser)]
 struct Cli {
@@ -21,6 +23,9 @@ struct Cli {
     /// Paths to dmp files.
     #[arg(short, long)]
     dmp: Vec<String>,
+    /// Reference path lists. Each line is a reference path to check in input PAKs.
+    #[arg(long)]
+    ref_list: Vec<String>,
     /// Number of threads to use.
     #[arg(long)]
     threads: Option<usize>,
@@ -34,6 +39,7 @@ struct AppConfig {
     pak: Vec<String>,
     pak_list: Option<String>,
     dmp: Vec<String>,
+    ref_list: Vec<String>,
     threads: Option<usize>,
     searcher_config: PathSearcherConfig,
 }
@@ -50,15 +56,63 @@ fn load_pak_list(pak_list_file: &str) -> eyre::Result<Vec<String>> {
     Ok(pak_file_list)
 }
 
-fn export_results(result: &SearchResult) -> eyre::Result<()> {
+fn load_ref_list(ref_list_file: &str) -> eyre::Result<Vec<String>> {
+    let mut refs = vec![];
+    let file = File::open(ref_list_file)?;
+    for line in io::BufReader::new(file).lines() {
+        let line = line?;
+        let line = line.trim();
+        if !line.is_empty() && !line.starts_with('#') {
+            refs.push(line.to_string());
+        }
+    }
+    Ok(refs)
+}
+
+fn canonicalize_ref_path(path: &str) -> String {
+    path.trim().replace('\\', "/")
+}
+
+fn resolve_reference_path<R: ree_pak_core::PakReader>(
+    pak: &ree_path_searcher::pak::PakCollection<R>,
+    line: &str,
+) -> Option<String> {
+    let line = line.trim();
+    if line.is_empty() || line.starts_with('#') {
+        return None;
+    }
+
+    let original = line.trim_start_matches(['@', '/']).replace('\\', "/");
+    if pak.contains_path(&original) {
+        return Some(original);
+    }
+
+    let canonical = canonicalize_ref_path(&original);
+    if pak.contains_path(&canonical) {
+        return Some(canonical);
+    }
+
+    None
+}
+
+fn export_results(result: &SearchResult, extra_full_paths: &[String]) -> eyre::Result<()> {
     let mut raw_writer = std::io::BufWriter::new(File::create("output_raw.list")?);
     let mut writer = std::io::BufWriter::new(File::create("output.list")?);
+    let mut written = FxHashSet::default();
 
     for (raw_path, indexes) in &result.found_paths {
         for index in indexes {
             writeln!(writer, "{}", index.full_path)?;
+            written.insert(index.full_path.hash_mixed());
         }
         writeln!(raw_writer, "{}", raw_path)?;
+    }
+
+    for path in extra_full_paths {
+        let hash = path.hash_mixed();
+        if written.insert(hash) {
+            writeln!(writer, "{path}")?;
+        }
     }
 
     let mut unknown_writer = std::io::BufWriter::new(File::create("unknown.list")?);
@@ -70,10 +124,16 @@ fn export_results(result: &SearchResult) -> eyre::Result<()> {
 }
 
 fn run(app: AppConfig) -> eyre::Result<()> {
-    if app.pak.is_empty() && app.pak_list.is_none() && app.dmp.is_empty() {
+    if app.pak.is_empty() && app.pak_list.is_none() && app.dmp.is_empty() && app.ref_list.is_empty()
+    {
         eprintln!(
-            "Error: No PAK or DMP files specified in cli arguments or config file. Use --pak, --pak-list, or --dmp options."
+            "Error: No PAK/DMP/reference list specified. Use --pak, --pak-list, --dmp, or --ref-list."
         );
+        std::process::exit(1);
+    }
+
+    if !app.ref_list.is_empty() && app.pak.is_empty() && app.pak_list.is_none() {
+        eprintln!("Error: --ref-list requires input PAKs. Use --pak or --pak-list.");
         std::process::exit(1);
     }
 
@@ -160,6 +220,39 @@ fn run(app: AppConfig) -> eyre::Result<()> {
         all_results.unknown_paths.extend(result.unknown_paths);
     }
 
+    // resolve reference list if provided
+    let mut ref_matched_full_paths: Vec<String> = vec![];
+    if !app.ref_list.is_empty() {
+        if let Some(pak) = searcher.pak_collection() {
+            let mut refs: Vec<String> = vec![];
+            for file in &app.ref_list {
+                refs.extend(load_ref_list(file)?);
+            }
+
+            let mut matched = FxHashSet::default();
+            let mut missing_count = 0usize;
+            for r in refs {
+                if let Some(full_path) = resolve_reference_path(pak, &r) {
+                    matched.insert(canonicalize_ref_path(&full_path));
+                } else {
+                    missing_count += 1;
+                }
+            }
+
+            ref_matched_full_paths = matched.into_iter().collect();
+            ref_matched_full_paths.sort_unstable();
+            eprintln!(
+                "Reference list: matched {} paths, missing {}.",
+                ref_matched_full_paths.len(),
+                missing_count
+            );
+        } else {
+            eprintln!(
+                "Warning: --ref-list provided but no PAK files loaded; skipping reference checks."
+            );
+        }
+    }
+
     println!("Sorting results..");
     all_results
         .found_paths
@@ -167,7 +260,7 @@ fn run(app: AppConfig) -> eyre::Result<()> {
     all_results.found_paths.dedup_by(|(p, _), (q, _)| p == q);
 
     println!("Exporting results..");
-    export_results(&all_results)?;
+    export_results(&all_results, &ref_matched_full_paths)?;
 
     let elapsed = start.elapsed();
     println!("Elapsed: {:.2?} seconds", elapsed.as_secs_f32());
@@ -198,6 +291,7 @@ fn main() -> eyre::Result<()> {
         pak: cli.pak,
         pak_list: cli.pak_list,
         dmp: cli.dmp,
+        ref_list: cli.ref_list,
         threads: cli.threads,
         searcher_config,
     })
