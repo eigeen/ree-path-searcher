@@ -15,30 +15,24 @@ pub fn find_path_i18n<R: PakReader>(
     config: &PathSearcherConfig,
     parts: &PathComponents<'_>,
 ) -> eyre::Result<Vec<I18nPakFileInfo>> {
-    let path = parts.raw_path();
+    let raw_path = parts.raw_path();
     let ext = parts.extension().context("Path missing extension")?;
-    let suffix = config
+    let versions = config
         .suffix_versions(ext)
         .context(format!("Unknown extension: {ext}"))?;
-    for suffix in suffix.iter().rev() {
+    for &version in versions.iter().rev() {
         let mut result = vec![];
-        let full_paths = [
-            format!("natives/STM/{path}.{suffix}"),
-            format!("natives/STM/{path}.{suffix}.X64"),
-            format!("natives/STM/{path}.{suffix}.STM"),
-            #[cfg(feature = "nsw")]
-            format!("natives/NSW/{path}.{suffix}"),
-            #[cfg(feature = "nsw")]
-            format!("natives/NSW/{path}.{suffix}.NSW"),
-            #[cfg(feature = "msg")]
-            format!("natives/MSG/{path}.{suffix}"),
-            #[cfg(feature = "msg")]
-            format!("natives/MSG/{path}.{suffix}.X64"),
-            #[cfg(feature = "msg")]
-            format!("natives/MSG/{path}.{suffix}.MSG"),
-        ];
 
-        for full_path in &full_paths {
+        let mut candidates = Vec::with_capacity(config.prefixes().len() * (2 + config.platform_suffixes().len()));
+        for prefix in config.prefixes() {
+            let base = format!("{prefix}{raw_path}.{version}");
+            candidates.push(base.clone());
+            for suffix in config.platform_suffixes() {
+                candidates.push(format!("{base}.{suffix}"));
+            }
+        }
+
+        for full_path in &candidates {
             // Check base path first (no language suffix)
             if pak.contains_path(full_path) {
                 result.push(I18nPakFileInfo {

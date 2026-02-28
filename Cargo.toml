@@ -33,8 +33,6 @@ toml = "0.9"
 
 [features]
 default = []
-nsw = []
-msg = []
 
 [dev-dependencies]
 criterion = { version = "0.8", features = ["html_reports"] }

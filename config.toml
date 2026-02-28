@@ -36,6 +36,9 @@ languages = [
     "Es419",
 ]
 prefixes = ["natives/STM/"]
+# prefixes = ["natives/STM/", "natives/NSW/", "natives/MSG/"]
+platform_suffixes = ["X64", "STM"]
+# platform_suffixes = ["X64", "STM", "NSW", "MSG"]
 use_builtin_suffix_map = false
 
 [suffix_map]

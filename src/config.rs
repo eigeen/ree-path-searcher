@@ -10,6 +10,7 @@ use serde::Deserialize;
 pub struct PathSearcherConfig {
     languages: Arc<[String]>,
     prefixes: Arc<[String]>,
+    platform_suffixes: Arc<[String]>,
     suffix_map: Arc<FxHashMap<String, Vec<u32>>>,
 }
 
@@ -17,6 +18,7 @@ pub struct PathSearcherConfig {
 struct PathSearcherConfigFile {
     pub languages: Option<Vec<String>>,
     pub prefixes: Option<Vec<String>>,
+    pub platform_suffixes: Option<Vec<String>>,
     #[serde(default = "default_true")]
     pub use_builtin_suffix_map: bool,
     #[serde(default)]
@@ -33,6 +35,7 @@ impl Default for PathSearcherConfig {
         Self {
             languages: default_languages().into(),
             prefixes: default_prefixes().into(),
+            platform_suffixes: default_platform_suffixes().into(),
             suffix_map: Arc::new(default_suffix_map_full_owned()),
         }
     }
@@ -41,7 +44,7 @@ impl Default for PathSearcherConfig {
 impl PathSearcherConfig {
     pub fn from_toml_str(toml_str: &str) -> eyre::Result<Self> {
         let file_cfg: PathSearcherConfigFile = toml::from_str(toml_str)?;
-        Ok(Self::from_file_config(file_cfg))
+        Self::from_file_config(file_cfg)
     }
 
     pub fn from_toml_file(path: impl AsRef<Path>) -> eyre::Result<Self> {
@@ -59,13 +62,25 @@ impl PathSearcherConfig {
         &self.prefixes
     }
 
+    /// Suffix tags, e.g. `.X64` / `.STM`.
+    pub fn platform_suffixes(&self) -> &[String] {
+        &self.platform_suffixes
+    }
+
     pub fn suffix_versions(&self, extension: &str) -> Option<&[u32]> {
         self.suffix_map.get(extension).map(Vec::as_slice)
     }
 
-    fn from_file_config(file_cfg: PathSearcherConfigFile) -> Self {
+    fn from_file_config(file_cfg: PathSearcherConfigFile) -> eyre::Result<Self> {
         let languages: Arc<[String]> = file_cfg.languages.unwrap_or_else(default_languages).into();
         let prefixes: Arc<[String]> = file_cfg.prefixes.unwrap_or_else(default_prefixes).into();
+        let platform_suffixes: Arc<[String]> = file_cfg
+            .platform_suffixes
+            .unwrap_or_else(default_platform_suffixes)
+            .into_iter()
+            .map(|s| canonicalize_platform_suffix(s.as_str()))
+            .collect::<Vec<_>>()
+            .into();
 
         let mut suffix_map = if file_cfg.use_builtin_suffix_map {
             default_suffix_map_full_owned()
@@ -79,16 +94,25 @@ impl PathSearcherConfig {
         suffix_map.extend(file_cfg.suffix_map_full);
         suffix_map.extend(file_cfg.suffix_map_overrides);
 
-        Self {
+        Ok(Self {
             languages,
             prefixes,
+            platform_suffixes,
             suffix_map: Arc::new(suffix_map),
-        }
+        })
     }
 }
 
 fn default_true() -> bool {
     true
+}
+
+fn default_platform_suffixes() -> Vec<String> {
+    vec!["X64".to_string(), "STM".to_string()]
+}
+
+fn canonicalize_platform_suffix(s: &str) -> String {
+    s.trim().to_uppercase()
 }
 
 fn default_languages() -> Vec<String> {
@@ -103,13 +127,7 @@ fn default_languages() -> Vec<String> {
 }
 
 fn default_prefixes() -> Vec<String> {
-    let mut prefixes = Vec::with_capacity(3);
-    prefixes.push("natives/STM/".to_string());
-    #[cfg(feature = "nsw")]
-    prefixes.push("natives/NSW/".to_string());
-    #[cfg(feature = "msg")]
-    prefixes.push("natives/MSG/".to_string());
-    prefixes
+    vec!["natives/STM/".to_string()]
 }
 
 fn default_suffix_map_full_owned() -> FxHashMap<String, Vec<u32>> {
