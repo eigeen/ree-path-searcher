@@ -216,7 +216,9 @@ fn run(app: AppConfig) -> eyre::Result<()> {
             progress_bar.enable_steady_tick(Duration::from_millis(100));
             progress_bar.set_style(
                 ProgressStyle::default_bar()
-                    .template("[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}")
+                    .template(
+                        "[{elapsed_precise}] {bar:40.cyan/blue} {pos:>7}/{len:7} {per_sec} {msg}",
+                    )
                     .unwrap()
                     .progress_chars("##-"),
             );

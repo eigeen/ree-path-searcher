@@ -171,14 +171,8 @@ impl<R: PakReader> PathSearcher<R> {
             return Ok(vec![]);
         };
 
-        // already a full path that exists in PAKs.
-        if pak.contains_path(parts.normalized_full_path()) {
-            return Ok(vec![I18nPakFileInfo {
-                full_path: parts.into_normalized_full_path(),
-            }]);
-        }
-
-        // only the numeric version differs; keep everything else intact.
+        // Do not accept the reference entry as-is. If it carries a version/platform/language tail,
+        // only reuse that tail while replacing the version from config.
         if let (Some(version_range), Some(ext)) = (parts.version_range(), parts.extension())
             && let Some(versions) = self.config().suffix_versions(ext)
         {
@@ -213,7 +207,11 @@ impl<R: PakReader> PathSearcher<R> {
             }]);
         }
 
-        suffix::find_path_i18n(pak, &self.config, &parts)
+        let Some(core_parts) = PathComponents::parse(raw_path, self.config()) else {
+            return Ok(vec![]);
+        };
+
+        suffix::find_path_i18n(pak, &self.config, &core_parts)
     }
 
     pub fn with_filter(mut self, filter: Arc<dyn Filter + Send + Sync>) -> Self {
@@ -544,4 +542,67 @@ fn validate_path(path: &str) -> bool {
 
     // dot must be in the middle
     dot_pos > 0 && dot_pos < tail.len() - 1
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{Cursor, Write};
+
+    use ree_pak_core::write::{FileOptions, PakWriter};
+
+    use super::*;
+
+    fn build_searcher_with_paths(
+        config: PathSearcherConfig,
+        paths: &[&str],
+    ) -> eyre::Result<PathSearcher<Cursor<Vec<u8>>>> {
+        let mut pak_bytes = Vec::new();
+        let buffer = Cursor::new(&mut pak_bytes);
+        let mut writer = PakWriter::new(buffer, paths.len() as u64);
+        for path in paths {
+            writer.start_file(*path, FileOptions::default())?;
+            writer.write_all(b"test")?;
+        }
+        writer.finish()?;
+
+        PathSearcher::<Cursor<Vec<u8>>>::builder()
+            .with_config(config)
+            .with_pak_file(Cursor::new(pak_bytes))?
+            .build()
+    }
+
+    #[test]
+    fn resolve_reference_line_replaces_only_version_and_keeps_tail_tags() {
+        let config = PathSearcherConfig::from_toml_str(
+            r#"
+languages = ["Ja"]
+prefixes = ["natives/STM/"]
+platform_suffixes = ["STM"]
+use_builtin_suffix_map = false
+
+[suffix_map]
+tex = [241106027]
+"#,
+        )
+        .unwrap();
+
+        let searcher = build_searcher_with_paths(
+            config,
+            &[
+                "natives/STM/test/sample.tex.241106027.STM.Ja",
+                "natives/STM/test/sample.tex.999999999.STM.Ja",
+            ],
+        )
+        .unwrap();
+
+        let resolved = searcher
+            .resolve_reference_line("natives/STM/test/sample.tex.999999999.STM.Ja")
+            .unwrap();
+
+        assert_eq!(resolved.len(), 1);
+        assert_eq!(
+            resolved[0].full_path,
+            "natives/STM/test/sample.tex.241106027.STM.Ja"
+        );
+    }
 }

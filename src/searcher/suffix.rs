@@ -23,7 +23,8 @@ pub fn find_path_i18n<R: PakReader>(
     for &version in versions.iter().rev() {
         let mut result = vec![];
 
-        let mut candidates = Vec::with_capacity(config.prefixes().len() * (2 + config.platform_suffixes().len()));
+        let mut candidates =
+            Vec::with_capacity(config.prefixes().len() * (2 + config.platform_suffixes().len()));
         for prefix in config.prefixes() {
             let base = format!("{prefix}{raw_path}.{version}");
             candidates.push(base.clone());
