@@ -6,6 +6,14 @@ A Rust tool for extracting file paths from RE Engine game PAK files and memory d
 
 ## Usage
 
+### How to get a DMP file
+
+1. Launch the game and wait until it reaches the state you want to inspect.
+2. Open **Task Manager**.
+3. Find the game process under **Processes** or **Details**.
+4. Right-click the process and choose **Create memory dump file**.
+5. Wait for Windows to finish writing the dump, then use the generated `.dmp` file with `--dmp`.
+
 ```bash
 # Extract paths from memory dump and PAK files
 ./ree-path-searcher.exe --dmp <memory_dump_file> --pak <pak_file_path>
@@ -14,6 +22,9 @@ A Rust tool for extracting file paths from RE Engine game PAK files and memory d
 ./ree-path-searcher.exe --pak <pak_file_path_1> --pak <pak_file_path_2>
 # or input a list file, each line is a PAK file path
 ./ree-path-searcher.exe --pak-list <pak_list_file>
+
+# Add reference path lists (each line can be a raw path or a full path; it will strip `natives/<PLATFORM>/` and tail parts like `.version(.platform)(.lang)` then resolve and append matched paths into output.list)
+./ree-path-searcher.exe --pak-list <pak_list_file> --ref-list <reference_list_file>
 
 # Use a custom resolver config (languages/prefixes/suffix map)
 ./ree-path-searcher.exe --config path_searcher.toml --pak <pak_file_path>
@@ -48,6 +59,14 @@ gtex = [240701004, 241106030]
 
 ## 使用方法
 
+### 如何获取 DMP 文件
+
+1. 启动游戏，并停留在你想分析的状态。
+2. 打开任务管理器。
+3. 在“进程”或“详细信息”中找到游戏进程。
+4. 右键该进程，选择“创建转储文件”。
+5. 等待 Windows 写出完成后，把生成的 `.dmp` 文件传给 `--dmp` 即可。
+
 ```bash
 # 从内存转储和PAK文件中提取路径
 ./ree-path-searcher.exe --dmp <memory_dump_file> --pak <pak_file_path>
@@ -56,6 +75,9 @@ gtex = [240701004, 241106030]
 ./ree-path-searcher.exe --pak <pak_file_path_1> --pak <pak_file_path_2>
 # 或输入一个列表文件，每行是一个PAK文件路径
 ./ree-path-searcher.exe --pak-list <pak_list_file>
+
+# 添加参考路径列表（每行可以是 raw 路径或完整路径；会自动去掉 `natives/<PLATFORM>/` 头部以及类似 `.version(.platform)(.lang)` 的尾部，再按扫描同样的解析规则匹配并追加进 output.list）
+./ree-path-searcher.exe --pak-list <pak_list_file> --ref-list <reference_list_file>
 
 # 使用自定义解析配置（语言/前缀/后缀版本覆盖）
 ./ree-path-searcher.exe --config path_searcher.toml --pak <pak_file_path>
